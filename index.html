@@ -74,15 +74,14 @@ if (!firebase.apps.length) {
 const rtdb = firebase.database();
 const DB_BASE = 'medeport/eot';
 
-/* ============ CONSTANTES Y VARIABLES ============ */
+/* ============ LAS 30 COLUMNAS MAESTRAS (COLUMNAS VACÍAS PURGADAS) ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
   'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
-  'Código', 'Color', 'Talla', 'Talla marca', 'Eancode', 'Descripción', 'Género', 'Código JDE',
+  'Código', 'Color', 'Talla', 'Talla marca', 'Descripción', 'Género',
   'Fecha de entrega', 'Fecha de venta', 'Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY',
-  'Etapa', 'Subetapa', 'Nº documento', 'Documento', 'EMBARQUE', 'Nº de embarque', 'Fecha estimada inicio',
-  'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura',
-  'Fecha salida embarque', 'Fecha llegada embarque', 'Fecha ingreso depósito'
+  'Etapa', 'Documento', 'EMBARQUE', 'Fecha estimada inicio',
+  'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura'
 ];
 const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY'];
 const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
@@ -97,7 +96,7 @@ const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '
 const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
 const cleanKey = (b, s) => `${b}_${s}`.replace(/[\.#$\[\]\/]/g, '_');
 const busy = m => { $('busyMsg').textContent = m || ''; $('busy').classList.toggle('hidden', !m); };
-const tick = () => new Promise(r => setTimeout(r, 20));
+const tick = () => new Promise(r => setTimeout(r, 15));
 
 function fdate(v) {
   if (!v) return '';
@@ -123,6 +122,57 @@ function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
   });
 }
 
+/* ============ OPTIMIZACIÓN DE DATOS (CHUNKS & PAYLOAD) ============ */
+function cleanRowForSave(r) {
+  const o = {};
+  for (const k in r) {
+    const v = r[k];
+    if (v !== '' && v !== null && v !== undefined && v !== 0) {
+      o[k] = v;
+    }
+  }
+  return o;
+}
+
+function restoreRow(o, brand, season) {
+  const r = {};
+  MASTER_COLS.forEach(c => {
+    if (NUM_COLS.includes(c)) {
+      r[c] = Number(o[c] || 0);
+    } else {
+      r[c] = o[c] != null ? String(o[c]) : '';
+    }
+  });
+  r.brand = brand;
+  r.season = season;
+  if (!r['Etapa']) r['Etapa'] = E10;
+  return r;
+}
+
+async function uploadRowsInBatches(brand, season, rows, label = 'Guardando en Firebase') {
+  const nodeKey = cleanKey(brand, season);
+  const dataRef = rtdb.ref(`${DB_BASE}/data/${nodeKey}`);
+  
+  await dataRef.remove();
+  
+  const BATCH_SIZE = 1000;
+  const total = rows.length;
+  
+  for (let i = 0; i < total; i += BATCH_SIZE) {
+    const chunk = rows.slice(i, i + BATCH_SIZE);
+    const updates = {};
+    chunk.forEach((r, idx) => {
+      updates[i + idx] = cleanRowForSave(r);
+    });
+    
+    busy(`${label}: ${fn(Math.min(i + BATCH_SIZE, total))} / ${fn(total)} filas…`);
+    await tick();
+    await dataRef.update(updates);
+  }
+  
+  await rtdb.ref(`${DB_BASE}/counts/${nodeKey}`).set(total);
+}
+
 /* ============ PERSISTENCIA EN FIREBASE ============ */
 async function saveMeta() {
   await rtdb.ref(`${DB_BASE}/seasons`).set(S.seasons);
@@ -131,9 +181,18 @@ async function saveMeta() {
 async function refreshCounts() {
   for (const b in S.seasons) {
     for (const s of S.seasons[b]) {
-      const snap = await rtdb.ref(`${DB_BASE}/data/${cleanKey(b, s)}`).once('value');
+      const k = cleanKey(b, s);
+      const snap = await rtdb.ref(`${DB_BASE}/counts/${k}`).once('value');
       const val = snap.val();
-      S.counts[b + '|' + s] = val ? (Array.isArray(val) ? val.length : Object.keys(val).length) : 0;
+      if (val !== null) {
+        S.counts[b + '|' + s] = Number(val || 0);
+      } else {
+        const dataSnap = await rtdb.ref(`${DB_BASE}/data/${k}`).once('value');
+        const dVal = dataSnap.val();
+        const cnt = dVal ? (Array.isArray(dVal) ? dVal.length : Object.keys(dVal).length) : 0;
+        S.counts[b + '|' + s] = cnt;
+        await rtdb.ref(`${DB_BASE}/counts/${k}`).set(cnt);
+      }
     }
   }
 }
@@ -142,11 +201,15 @@ async function reload() {
   if (!S.season) {
     S.rows = [];
   } else {
+    busy('Descargando temporada…');
+    await tick();
     const snap = await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).once('value');
     const val = snap.val();
-    S.rows = val ? (Array.isArray(val) ? val : Object.values(val)) : [];
+    const rawArr = val ? (Array.isArray(val) ? val : Object.values(val)) : [];
+    S.rows = rawArr.map(o => restoreRow(o, S.brand, S.season));
   }
   await refreshCounts();
+  busy();
   render();
 }
 
@@ -197,18 +260,15 @@ async function loadBuyInitial(file) {
     if (S.rows.length) {
       const c = await modal(
         'Confirmar sobrescritura en Firebase',
-        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b> en la base central.<br><br>
+        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b> en la nube.<br><br>
         Al cargar como <b>Compra Inicial</b> se reemplazará la información por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
         <span class="text-xs text-slate-500">Este cambio se reflejará al instante para todo el equipo.</span>`,
         [['Cancelar', 'c'], ['Sí, actualizar en Firebase', 'ok', 'danger']]
       );
       if (c !== 'ok') return;
     }
-    busy('Guardando compra inicial en Firebase…');
-    await tick();
-    await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).set(rows);
+    await uploadRowsInBatches(S.brand, S.season, rows, 'Subiendo compra inicial');
     await reload();
-    busy();
     modal('Base Sincronizada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
   } catch(e) {
     busy();
@@ -232,16 +292,13 @@ async function loadBuyExtra(file) {
     const c = await modal(
       'Anexar compra extra a Firebase',
       `Se sumarán <b>${fn(rows.length)} filas nuevas</b> a <b>${S.brand} ${S.season}</b>.<br><br>
-      Las filas previas (incluyendo estados P24 y DROPs) permanecerán intactas.`,
+      Las filas previas (incluyendo P24 y DROPs) permanecerán intactas.`,
       [['Cancelar', 'c'], ['Anexar compra', 'ok', 1]]
     );
     if (c !== 'ok') return;
-    busy('Sincronizando anexos en Firebase…');
-    await tick();
     const updatedRows = [...S.rows, ...rows];
-    await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).set(updatedRows);
+    await uploadRowsInBatches(S.brand, S.season, updatedRows, 'Anexando a Firebase');
     await reload();
-    busy();
     modal('Compra Extra Guardada', `Se anexaron ${fn(rows.length)} filas en estado 10A a la base compartida.`);
   } catch(e) {
     busy();
@@ -267,9 +324,10 @@ async function clearSeasonData() {
   if (c2 !== 'yes') return;
   busy('Eliminando registros de Firebase…');
   await tick();
-  await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).remove();
+  const k = cleanKey(S.brand, S.season);
+  await rtdb.ref(`${DB_BASE}/data/${k}`).remove();
+  await rtdb.ref(`${DB_BASE}/counts/${k}`).set(0);
   await reload();
-  busy();
   modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b> en Firebase.`);
 }
 
@@ -364,12 +422,9 @@ async function loadOc(file) {
     );
     if (ch !== 'ok') return;
 
-    busy('Sincronizando cambios en Firebase…');
-    await tick();
     const finalRows = [...S.rows, ...added];
-    await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).set(finalRows);
+    await uploadRowsInBatches(S.brand, S.season, finalRows, 'Actualizando cruce en Firebase');
     await reload();
-    busy();
     modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b>.`);
   } catch(e) {
     busy();
@@ -435,10 +490,7 @@ function renderSide() {
 async function pick(b, s) {
   S.brand = b; S.season = s;
   S.page = 1;
-  busy('Cargando desde Firebase…');
-  await tick();
   await reload();
-  busy();
 }
 
 async function newSeason(b) {
@@ -726,7 +778,6 @@ function vCanal() {
     });
 
     await reload();
-    busy();
   } catch(e) {
     busy();
     $('cloudStatus').innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span> Desconectado';
