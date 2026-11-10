@@ -6,7 +6,6 @@
 <title>EOT · Elastic Order Tracking</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
-  // Silenciar advertencia de Tailwind CDN en consola
   const _origWarn = console.warn;
   console.warn = function(...args) {
     if (args[0] && typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
@@ -16,11 +15,16 @@
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.1/dist/umd/lucide.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<!-- Firebase SDK Compat -->
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+
 <style>
   body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:#eef0ee;color:#18212b}
   .num{font-variant-numeric:tabular-nums;text-align:right}
   thead th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:0 1px 0 #d5d9d6}
-  .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .8rem;border-radius:.375rem;font-size:.85rem;font-weight:500;border:1px solid #c9cfcb;background:#fff}
+  .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .8rem;border-radius:.375rem;font-size:.85rem;font-weight:500;border:1px solid #c9cfcb;background:#fff;cursor:pointer}
   .btn:hover{background:#f3f5f3}.btn-p{background:#243b6b;color:#fff;border-color:#243b6b}.btn-p:hover{background:#1c2f57}
   .btn-danger{background:#fff;color:#b91c1c;border-color:#fca5a5}.btn-danger:hover{background:#fef2f2}
   .tab{padding:.6rem 1rem;font-size:.9rem;font-weight:500;border-bottom:2px solid transparent;color:#5b6670}
@@ -31,9 +35,14 @@
 </head>
 <body class="h-screen flex overflow-hidden">
 <aside class="w-64 shrink-0 flex flex-col text-slate-200" style="background:#16212e">
-  <div class="px-5 py-4 border-b border-white/10">
-    <div class="font-bold text-white text-lg">EOT</div>
-    <div class="text-xs text-slate-400">Elastic Order Tracking</div>
+  <div class="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+    <div>
+      <div class="font-bold text-white text-lg">EOT</div>
+      <div class="text-xs text-slate-400">Elastic Order Tracking</div>
+    </div>
+    <div id="cloudStatus" class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Conectado a Firebase">
+      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Cloud
+    </div>
   </div>
   <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
 </aside>
@@ -42,14 +51,30 @@
 <input type="file" id="fBuyInit" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fBuyExtra" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fOc" accept=".xlsx,.xls,.csv" class="hidden">
-
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
 <div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
   <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
 </div>
 
 <script>
-/* ============ LAS 37 COLUMNAS MAESTRAS + EMBARQUE ============ */
+/* ============ CONFIGURACIÓN DE FIREBASE ============ */
+const firebaseConfig = {
+  apiKey: "AIzaSyBQvCoA6p83O12z95pvbOO12hkjmrj5Ssk",
+  authDomain: "embarques-mdp-7c49b.firebaseapp.com",
+  databaseURL: "https://embarques-mdp-7c49b-default-rtdb.firebaseio.com",
+  projectId: "embarques-mdp-7c49b",
+  storageBucket: "embarques-mdp-7c49b.firebasestorage.app",
+  messagingSenderId: "114901426718",
+  appId: "1:114901426718:web:c3cbaf5db203e62c76040f"
+};
+
+if (!firebase.apps.length) {
+  firebase.initializeApp(firebaseConfig);
+}
+const rtdb = firebase.database();
+const DB_BASE = 'medeport/eot';
+
+/* ============ CONSTANTES Y VARIABLES ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
   'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
@@ -59,10 +84,8 @@ const MASTER_COLS = [
   'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura',
   'Fecha salida embarque', 'Fecha llegada embarque', 'Fecha ingreso depósito'
 ];
-
 const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY'];
 const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
-let db;
 
 const $ = id => document.getElementById(id);
 const icons = () => { try { window.lucide && lucide.createIcons(); } catch(e){} };
@@ -72,7 +95,7 @@ const usd = n => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionD
 const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '');
 const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
-const sbKey = () => S.brand + '|' + S.season;
+const cleanKey = (b, s) => `${b}_${s}`.replace(/[\.#$\[\]\/]/g, '_');
 const busy = m => { $('busyMsg').textContent = m || ''; $('busy').classList.toggle('hidden', !m); };
 const tick = () => new Promise(r => setTimeout(r, 20));
 
@@ -100,68 +123,29 @@ function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
   });
 }
 
-/* ============ INDEXEDDB ============ */
-const rq = r => new Promise((ok, ko) => { r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
-const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.onabort = () => ko(t.error); });
-
-function openDB() {
-  return new Promise((ok, ko) => {
-    const r = indexedDB.open('eot-db-final', 1);
-    r.onupgradeneeded = () => {
-      const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
-      s.createIndex('sb', 'sb');
-      r.result.createObjectStore('meta');
-    };
-    r.onsuccess = () => ok(r.result);
-    r.onerror = () => ko(r.error);
-  });
-}
-
-async function dbAdd(rows, label) {
-  for (let i = 0; i < rows.length; i += 5000) {
-    const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
-    rows.slice(i, i + 5000).forEach(r => s.add(r));
-    await txDone(t);
-    if (label && rows.length > 5000) {
-      busy(label + ' ' + fn(Math.min(i + 5000, rows.length)) + ' / ' + fn(rows.length));
-      await tick();
-    }
-  }
-}
-
-async function dbPut(rows) {
-  for (let i = 0; i < rows.length; i += 5000) {
-    const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
-    rows.slice(i, i + 5000).forEach(r => s.put(r));
-    await txDone(t);
-  }
-}
-
-async function dbDelSeason(key) {
-  const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
-  const ks = await rq(s.index('sb').getAllKeys(key));
-  ks.forEach(k => s.delete(k));
-  await txDone(t);
-}
-
-const dbSeason = key => rq(db.transaction('rows').objectStore('rows').index('sb').getAll(key));
-
+/* ============ PERSISTENCIA EN FIREBASE ============ */
 async function saveMeta() {
-  const t = db.transaction('meta', 'readwrite');
-  t.objectStore('meta').put(S.seasons, 'seasons');
-  await txDone(t);
+  await rtdb.ref(`${DB_BASE}/seasons`).set(S.seasons);
 }
 
 async function refreshCounts() {
   for (const b in S.seasons) {
     for (const s of S.seasons[b]) {
-      S.counts[b + '|' + s] = await rq(db.transaction('rows').objectStore('rows').index('sb').count(b + '|' + s));
+      const snap = await rtdb.ref(`${DB_BASE}/data/${cleanKey(b, s)}`).once('value');
+      const val = snap.val();
+      S.counts[b + '|' + s] = val ? (Array.isArray(val) ? val.length : Object.keys(val).length) : 0;
     }
   }
 }
 
 async function reload() {
-  S.rows = S.season ? await dbSeason(sbKey()) : [];
+  if (!S.season) {
+    S.rows = [];
+  } else {
+    const snap = await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).once('value');
+    const val = snap.val();
+    S.rows = val ? (Array.isArray(val) ? val : Object.values(val)) : [];
+  }
   await refreshCounts();
   render();
 }
@@ -172,7 +156,6 @@ async function parseExcelFile(file) {
   const sheet = wb.SheetNames[0];
   const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '', raw: true });
   if (!raw.length) throw new Error('El archivo no contiene filas legibles.');
-
   const fileHeaders = Object.keys(raw[0]);
   const headerMap = {};
   MASTER_COLS.forEach(mCol => {
@@ -180,11 +163,9 @@ async function parseExcelFile(file) {
     const found = fileHeaders.find(h => norm(h) === nCol);
     if (found) headerMap[mCol] = found;
   });
-
   if (!headerMap['Código'] || !headerMap['Cantidad']) {
     throw new Error('El archivo debe incluir obligatoriamente las columnas "Código" y "Cantidad".');
   }
-
   const rows = [];
   for (const o of raw) {
     const r = {};
@@ -198,10 +179,7 @@ async function parseExcelFile(file) {
         r[col] = val == null ? '' : String(val).trim();
       }
     });
-
     if (!r['Etapa']) r['Etapa'] = E10;
-
-    r.sb = sbKey();
     r.brand = S.brand;
     r.season = S.season;
     if (r['Código'] && r['Cantidad'] > 0) rows.push(r);
@@ -215,26 +193,23 @@ async function loadBuyInitial(file) {
     busy('Leyendo compra inicial…');
     await tick();
     const rows = await parseExcelFile(file);
-
     busy();
     if (S.rows.length) {
       const c = await modal(
-        'Confirmar sobrescritura de temporada',
-        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b>.<br><br>
-        Al cargar como <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
-        <span class="text-xs text-slate-500">Si deseas sumar pedidos adicionales sin borrar nada, usa el botón "Cargar compra extra".</span>`,
-        [['Cancelar', 'c'], ['Sí, cargar como compra inicial', 'ok', 'danger']]
+        'Confirmar sobrescritura en Firebase',
+        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b> en la base central.<br><br>
+        Al cargar como <b>Compra Inicial</b> se reemplazará la información por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
+        <span class="text-xs text-slate-500">Este cambio se reflejará al instante para todo el equipo.</span>`,
+        [['Cancelar', 'c'], ['Sí, actualizar en Firebase', 'ok', 'danger']]
       );
       if (c !== 'ok') return;
     }
-
-    busy('Guardando compra inicial…');
+    busy('Guardando compra inicial en Firebase…');
     await tick();
-    await dbDelSeason(sbKey());
-    await dbAdd(rows, 'Guardando');
+    await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).set(rows);
     await reload();
     busy();
-    modal('Compra Inicial Cargada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
+    modal('Base Sincronizada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
   } catch(e) {
     busy();
     modal('Error al cargar compra inicial', esc(e.message || e));
@@ -247,29 +222,27 @@ async function loadBuyExtra(file) {
     busy('Leyendo compra extra…');
     await tick();
     const rows = await parseExcelFile(file);
-
     rows.forEach(r => {
       r['Etapa'] = E10;
       r['Factura'] = '';
       r['Fecha de factura'] = '';
       r['EMBARQUE'] = '';
     });
-
     busy();
     const c = await modal(
-      'Anexar compra extra',
+      'Anexar compra extra a Firebase',
       `Se sumarán <b>${fn(rows.length)} filas nuevas</b> a <b>${S.brand} ${S.season}</b>.<br><br>
-      Tus filas previas (incluidas las que ya tienen P24 y DROPs) permanecerán intactas.`,
+      Las filas previas (incluyendo estados P24 y DROPs) permanecerán intactas.`,
       [['Cancelar', 'c'], ['Anexar compra', 'ok', 1]]
     );
     if (c !== 'ok') return;
-
-    busy('Anexando filas a la base…');
+    busy('Sincronizando anexos en Firebase…');
     await tick();
-    await dbAdd(rows, 'Guardando');
+    const updatedRows = [...S.rows, ...rows];
+    await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).set(updatedRows);
     await reload();
     busy();
-    modal('Compra Extra Anexada', `Se añadieron ${fn(rows.length)} filas en estado 10A a la temporada.`);
+    modal('Compra Extra Guardada', `Se anexaron ${fn(rows.length)} filas en estado 10A a la base compartida.`);
   } catch(e) {
     busy();
     modal('Error al anexar compra extra', esc(e.message || e));
@@ -279,28 +252,25 @@ async function loadBuyExtra(file) {
 /* ============ 3. BORRAR COMPRA TOTAL ============ */
 async function clearSeasonData() {
   if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada.');
-
   const c1 = await modal(
-    '¿Borrar toda la compra de la temporada?',
-    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b>.<br><br>
-    Esta acción reinicia la temporada a 0 filas y no se puede deshacer.`,
+    '¿Borrar compra de Firebase?',
+    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b> en la nube.<br><br>
+    Esta acción reinicia la temporada a 0 filas para ti y tus compañeros.`,
     [['Cancelar', 'c'], ['Continuar con el borrado', 'next', 'danger']]
   );
   if (c1 !== 'next') return;
-
   const c2 = await modal(
     'Confirmación de seguridad requerida',
-    `Por favor confirma una vez más que deseas vaciar por completo la temporada <b>${S.brand} ${S.season}</b>.`,
+    `Confirma nuevamente que deseas vaciar por completo la temporada <b>${S.brand} ${S.season}</b> de Firebase.`,
     [['Cancelar', 'c'], ['Confirmar y borrar todo', 'yes', 'danger']]
   );
   if (c2 !== 'yes') return;
-
-  busy('Borrando registros de la temporada…');
+  busy('Eliminando registros de Firebase…');
   await tick();
-  await dbDelSeason(sbKey());
+  await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).remove();
   await reload();
   busy();
-  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
+  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b> en Firebase.`);
 }
 
 /* ============ 4. CRUCE DE OC TRABAJADA ============ */
@@ -311,30 +281,24 @@ async function loadOc(file) {
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
     const targetSheet = wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0];
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
-
     if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC.');
 
     const exactIndex = new Map();
     const skuTallaIndex = new Map();
-
     S.rows.forEach(r => {
       if (st(r) === 'o') {
         const cod = norm(r['Código']);
         const col = norm(r['Color']);
         const tal = normTalla(r['Talla']);
-
         const kExact = `${cod}|${col}|${tal}`;
         const kSkuTal = `${cod}|${tal}`;
-
         if (!exactIndex.has(kExact)) exactIndex.set(kExact, []);
         exactIndex.get(kExact).push(r);
-
         if (!skuTallaIndex.has(kSkuTal)) skuTallaIndex.set(kSkuTal, []);
         skuTallaIndex.get(kSkuTal).push(r);
       }
     });
 
-    const changed = new Set();
     const added = [];
     let matchedUnits = 0;
     let matchedLines = 0;
@@ -348,14 +312,12 @@ async function loadOc(file) {
       const fact = String(o['Factura'] || o['No FACTURA '] || '').trim();
       const refFinal = String(o['Referencia compra'] || o['CANAL'] || '').trim();
       const embFinal = String(o['EMBARQUE'] || o['Embarque'] || o['Nº de embarque'] || o['EMBARQUES'] || '').trim();
-
       if (!cod || qty <= 0) continue;
 
       let pool = exactIndex.get(`${cod}|${col}|${tal}`);
       if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
         pool = skuTallaIndex.get(`${cod}|${tal}`);
       }
-
       if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
         unmatched.push({ cod: o['Código'], col: o['Color'], tal: o['Talla'], qty });
         continue;
@@ -365,7 +327,6 @@ async function loadOc(file) {
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
         if (baseRow['Cantidad'] <= 0 || baseRow['Etapa'].startsWith('P24')) continue;
-
         if (baseRow['Cantidad'] <= rem) {
           rem -= baseRow['Cantidad'];
           matchedUnits += baseRow['Cantidad'];
@@ -375,10 +336,8 @@ async function loadOc(file) {
           if (o['Color']) baseRow['Color'] = o['Color'];
           if (embFinal) baseRow['EMBARQUE'] = embFinal;
           if (o['Fecha de factura']) baseRow['Fecha de factura'] = fdate(o['Fecha de factura']);
-          changed.add(baseRow);
         } else {
           const facturada = { ...baseRow };
-          delete facturada.id;
           facturada['Cantidad'] = rem;
           facturada['Etapa'] = EP;
           if (fact) facturada['Factura'] = fact;
@@ -390,8 +349,6 @@ async function loadOc(file) {
           baseRow['Cantidad'] -= rem;
           matchedUnits += rem;
           rem = 0;
-
-          changed.add(baseRow);
           added.push(facturada);
         }
       }
@@ -400,18 +357,17 @@ async function loadOc(file) {
 
     busy();
     const ch = await modal(
-      'Confirmar cruce de OC',
+      'Confirmar cruce de OC en la nube',
       `<p>Se cruzaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasarán a P24 con su información de Embarque.</p>
-      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo en la compra inicial.</p>` : ''}`,
-      [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
+      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en la compra inicial.</p>` : ''}`,
+      [['Cancelar', 'c'], ['Actualizar base compartida', 'ok', 1]]
     );
-
     if (ch !== 'ok') return;
 
-    busy('Actualizando base de datos…');
+    busy('Sincronizando cambios en Firebase…');
     await tick();
-    await dbPut([...changed]);
-    if (added.length) await dbAdd(added);
+    const finalRows = [...S.rows, ...added];
+    await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).set(finalRows);
     await reload();
     busy();
     modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b>.`);
@@ -421,10 +377,10 @@ async function loadOc(file) {
   }
 }
 
-/* ============ 5. EXPORTACIÓN EXCEL COMPLETA ============ */
+/* ============ 5. EXPORTACIÓN EXCEL ============ */
 function exportFullExcel() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
-  busy('Generando archivo Excel con las 37 columnas maestras…');
+  busy('Generando archivo Excel desde Firebase…');
   setTimeout(() => {
     const aoa = [MASTER_COLS];
     S.rows.forEach(r => {
@@ -432,7 +388,7 @@ function exportFullExcel() {
     });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
-    XLSX.writeFile(wb, `SITUACION_SEGUMIENTOS_${S.brand}_${S.season}.xlsx`);
+    XLSX.writeFile(wb, `SITUACION_SEGUIMIENTOS_${S.brand}_${S.season}.xlsx`);
     busy();
   }, 50);
 }
@@ -479,7 +435,7 @@ function renderSide() {
 async function pick(b, s) {
   S.brand = b; S.season = s;
   S.page = 1;
-  busy('Cargando…');
+  busy('Cargando desde Firebase…');
   await tick();
   await reload();
   busy();
@@ -504,20 +460,18 @@ function renderMain() {
     </div>`;
     return;
   }
-
   const tabs = [
     ['dash', 'Resumen', 'layout-dashboard'],
     ['mx', 'Matriz de seguimiento', 'table'],
     ['drop', 'Reporte de DROPS', 'ban'],
     ['canal', 'Resumen por canal', 'git-branch']
   ];
-
   m.innerHTML = `
     <header class="bg-white border-b px-6 pt-4">
       <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
         <div>
           <h1 class="text-xl font-semibold">${S.brand} ${esc(S.season)}</h1>
-          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
+          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Sincronizado en Firebase Realtime Database</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
@@ -533,7 +487,6 @@ function renderMain() {
     </header>
     <section class="flex-1 min-h-0 overflow-y-auto p-6" id="view"></section>
   `;
-
   ({ dash: vDash, mx: vMx, drop: vDrop, canal: vCanal })[S.tab]();
 }
 
@@ -557,7 +510,6 @@ function vDash() {
     else { o += q; of_ += v; }
   }
   const fr = t ? (p / t * 100).toFixed(1) : '0.0';
-
   $('view').innerHTML = `
     <div class="grid gap-3 grid-cols-2 xl:grid-cols-5">
       ${kpi('Unidades compradas', fn(t), usd(tf) + ' FOB')}
@@ -602,7 +554,6 @@ function vMx() {
   `;
   $('fe').value = S.f.etapa;
   $('fc').value = S.f.canal;
-
   let t;
   const go = () => {
     S.f = { q: $('q').value, etapa: $('fe').value, canal: $('fc').value };
@@ -621,7 +572,6 @@ function drawMx() {
     (!f.canal || r['Referencia compra'] === f.canal) &&
     (!q || (String(r['Código']) + ' ' + String(r['Descripción']) + ' ' + String(r['Factura']) + ' ' + String(r['EMBARQUE'])).toLowerCase().includes(q))
   );
-
   const pg = rows.slice((S.page - 1) * S.size, S.page * S.size);
   $('tbl').innerHTML = `
     <div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 290px)">
@@ -723,7 +673,6 @@ function vCanal() {
   });
   const L = Object.entries(g).sort((a, b) => b[1].q - a[1].q);
   const tot = L.reduce((a, e) => a + e[1].q, 0);
-
   $('view').innerHTML = `
     <div class="bg-white border rounded-lg overflow-auto max-w-3xl">
       <table class="w-full text-sm">
@@ -759,13 +708,30 @@ function vCanal() {
 
 (async () => {
   try {
-    db = await openDB();
-    const m = await rq(db.transaction('meta').objectStore('meta').get('seasons'));
-    if (m) S.seasons = m;
-    await refreshCounts();
-    render();
+    busy('Conectando con Firebase…');
+    const metaSnap = await rtdb.ref(`${DB_BASE}/seasons`).once('value');
+    const m = metaSnap.val();
+    if (m) {
+      S.seasons = m;
+    } else {
+      await saveMeta();
+    }
+
+    rtdb.ref(`${DB_BASE}/seasons`).on('value', snap => {
+      const updated = snap.val();
+      if (updated) {
+        S.seasons = updated;
+        renderSide();
+      }
+    });
+
+    await reload();
+    busy();
   } catch(e) {
-    document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB: ' + esc(e.message) + '</p>';
+    busy();
+    $('cloudStatus').innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span> Desconectado';
+    $('cloudStatus').className = 'flex items-center gap-1.5 text-[11px] text-red-400 font-medium bg-red-950/60 border border-red-500/30 px-2 py-0.5 rounded-full';
+    modal('Error de conexión a Firebase', 'No se pudo conectar a la base de datos: ' + esc(e.message));
   }
 })();
 </script>
