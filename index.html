@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EOT · Seguimiento de compras y órdenes</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  // Silenciar advertencia de Tailwind CDN en la consola
+  const _origWarn = console.warn;
+  console.warn = function(...args) {
+    if (args[0] && typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
+    _origWarn.apply(console, args);
+  };
+</script>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.263.1/dist/umd/lucide.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:#eef0ee;color:#18212b}
+  .num{font-variant-numeric:tabular-nums;text-align:right}
+  thead th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:0 1px 0 #d5d9d6}
+  .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .8rem;border-radius:.375rem;font-size:.85rem;font-weight:500;border:1px solid #c9cfcb;background:#fff}
+  .btn:hover{background:#f3f5f3}.btn-p{background:#243b6b;color:#fff;border-color:#243b6b}.btn-p:hover{background:#1c2f57}
+  .tab{padding:.6rem 1rem;font-size:.9rem;font-weight:500;border-bottom:2px solid transparent;color:#5b6670}
+  .tab.on{border-color:#243b6b;color:#243b6b}
+  .r-p{background:#e8f5ec}.r-o{background:#fff7e0}.r-d{background:#f4e4e4;color:#6b5555}
+  :focus-visible{outline:2px solid #243b6b;outline-offset:2px}
+</style>
+</head>
+<body class="h-screen flex overflow-hidden">
+<aside class="w-64 shrink-0 flex flex-col text-slate-200" style="background:#16212e">
+  <div class="px-5 py-4 border-b border-white/10"><div class="font-bold text-white text-lg">EOT</div><div class="text-xs text-slate-400">Elastic Order Tracking</div></div>
+  <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
+  <div class="p-3 border-t border-white/10 grid grid-cols-2 gap-2">
+    <button class="btn !bg-transparent !text-slate-200 !border-white/20 justify-center" onclick="backupOut()"><i data-lucide="download" class="w-4 h-4"></i>Respaldo</button>
+    <button class="btn !bg-transparent !text-slate-200 !border-white/20 justify-center" onclick="document.getElementById('fBk').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar</button>
+  </div>
+</aside>
+<main id="main" class="flex-1 min-w-0 flex flex-col"></main>
+<input type="file" id="fBuy" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fOc" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fBk" accept=".json" class="hidden">
+<div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
+<div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium"><span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span></div>
+<script>
+/* ============ CONSTANTES ============ */
+const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
+const COLS=[['seg','Seguimiento',['seguimiento']],['temp','Temporada',['temporada']],['marca','Marca',['marca']],['grupo','Grupo',['grupo']],['cat','Categoría',['categoria']],['act','Actividad',['actividad']],['ref','Referencia compra',['referenciacompra','referenciacomprafinal','referenciafinal','referencia']],['cod','Código',['codigo','sku']],['color','Color',['color']],['talla','Talla',['talla']],['tallaM','Talla marca',['tallamarca']],['desc','Descripción',['descripcion']],['gen','Género',['genero']],['fEnt','Fecha de entrega',['fechadeentrega']],['fVen','Fecha de venta',['fechadeventa']],['qty','Cantidad',['cantidad']],['fob','FOB',['fob']],['pvp','PVP',['pvp']],['p4','P4',['p4']],['pmy','PMY',['pmy']],['etapa','Etapa',['etapa']],['doc','Documento',['documento']],['fact','Factura',['factura','nfactura','numerofactura','nrofactura']],['fFact','Fecha de factura',['fechadefactura','fechafactura']],['emb','Embarque',['embarque']]];
+const EXTRA=[['canal',['canal','canalfinal','canalventa','canaldeventa']],['sap',['sap']],['fobM',['fobmarca']]];
+const NUM=['qty','fob','pvp','p4','pmy'], DATES=['fEnt','fVen','fFact'];
+/* ============ ESTADO ============ */
+const S={brand:'Adidas',season:null,rows:[],tab:'dash',seasons:{Adidas:[],Reebok:[]},counts:{},f:{q:'',etapa:'',canal:'',fact:''},page:1,size:50};
+let db;
+/* ============ UTILIDADES ============ */
+const $=id=>document.getElementById(id);
+const icons=()=>{try{window.lucide&&lucide.createIcons()}catch(e){}};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fn=n=>Number(n||0).toLocaleString('es');
+const usd=n=>'$'+Number(n||0).toLocaleString('en-US',{maximumFractionDigits:0});
+const norm=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');
+const st=r=>r.etapa.startsWith('P24')?'p':r.etapa.startsWith('DROP')?'d':'o';
+const skuKey=(c,col,t)=>[c,col,t].map(x=>String(x).trim().toUpperCase().replace(',','.')).join('|');
+const sbKey=()=>S.brand+'|'+S.season;
+const busy=m=>{$('busyMsg').textContent=m||'';$('busy').classList.toggle('hidden',!m)};
+const tick=()=>new Promise(r=>setTimeout(r,20));
+function fdate(v){if(v instanceof Date&&!isNaN(v))return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0')+'-'+String(v.getDate()).padStart(2,'0');return v==null?'':String(v).trim()}
+function modal(title,body,btns=[['Cerrar','x',1]]){return new Promise(res=>{const m=$('modal');
+  m.innerHTML=`<div class="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6"><h3 class="text-lg font-semibold mb-3">${title}</h3><div class="text-sm space-y-3">${body}</div><div class="flex justify-end gap-2 mt-5">${btns.map(b=>`<button data-b="${b[1]}" class="btn ${b[2]?'btn-p':''}">${b[0]}</button>`).join('')}</div></div>`;
+  m.classList.remove('hidden');m.onclick=e=>{const b=e.target.closest('[data-b]');if(b){m.classList.add('hidden');res(b.dataset.b)}}})}
+/* ============ INDEXEDDB ============ */
+const rq=r=>new Promise((ok,ko)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>ko(r.error)});
+const txDone=t=>new Promise((ok,ko)=>{t.oncomplete=ok;t.onerror=t.onabort=()=>ko(t.error)});
+function openDB(){return new Promise((ok,ko)=>{const r=indexedDB.open('eot-db',1);
+  r.onupgradeneeded=()=>{const s=r.result.createObjectStore('rows',{keyPath:'id',autoIncrement:true});s.createIndex('sb','sb');r.result.createObjectStore('meta')};
+  r.onsuccess=()=>ok(r.result);r.onerror=()=>ko(r.error)})}
+async function dbAdd(rows,label){for(let i=0;i<rows.length;i+=5000){const t=db.transaction('rows','readwrite'),s=t.objectStore('rows');rows.slice(i,i+5000).forEach(r=>s.add(r));await txDone(t);if(label&&rows.length>5000){busy(label+' '+fn(Math.min(i+5000,rows.length))+' / '+fn(rows.length));await tick()}}}
+async function dbPut(rows){const t=db.transaction('rows','readwrite'),s=t.objectStore('rows');rows.forEach(r=>s.put(r));await txDone(t)}
+async function dbDelSeason(key){const t=db.transaction('rows','readwrite'),s=t.objectStore('rows');const ks=await rq(s.index('sb').getAllKeys(key));ks.forEach(k=>s.delete(k));await txDone(t)}
+const dbSeason=key=>rq(db.transaction('rows').objectStore('rows').index('sb').getAll(key));
+async function saveMeta(){const t=db.transaction('meta','readwrite');t.objectStore('meta').put(S.seasons,'seasons');await txDone(t)}
+async function refreshCounts(){for(const b in S.seasons)for(const s of S.seasons[b])S.counts[b+'|'+s]=await rq(db.transaction('rows').objectStore('rows').index('sb').count(b+'|'+s))}
+async function reload(){S.rows=S.season?await dbSeason(sbKey()):[];await refreshCounts();render()}
+/* ============ LECTURA DE EXCEL ============ */
+async function readSheet(file){
+  const wb=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});
+  const raw=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:'',raw:true});
+  if(!raw.length)throw new Error('El archivo no contiene filas.');
+  const map={};Object.keys(raw[0]).forEach(h=>{const n=norm(h);[...COLS.map(c=>[c[0],c[2]]),...EXTRA].forEach(([k,al])=>{if(!(k in map)&&al.includes(n))map[k]=h})});
+  return{raw,map}}
+function toRow(o,map){const r={};for(const k in map)r[k]=o[map[k]];
+  NUM.forEach(k=>r[k]=Number(String(r[k]??0).replace(',','.'))||0);DATES.forEach(k=>r[k]=fdate(r[k]));r.fobM=Number(String(r.fobM??0).replace(',','.'))||0;
+  ['seg','temp','marca','grupo','cat','act','ref','cod','color','talla','tallaM','desc','gen','doc','fact','emb','etapa','canal','sap'].forEach(k=>r[k]=r[k]==null?'':String(r[k]).trim());return r}
+function missing(map,req){return req.filter(k=>!(k in map)).map(k=>(COLS.find(c=>c[0]==k)||[0,k.toUpperCase()])[1])}
+function needSeason(){if(!S.season){modal('Elige una temporada','Selecciona o crea una temporada en la barra lateral antes de cargar archivos.');return false}return true}
+const fail=(t,e)=>{busy();modal(t,esc(e.message||e))};
+/* ============ CARGA DE COMPRA ============ */
+async function loadBuy(file){
+  try{busy('Leyendo archivo…');await tick();
+    const{raw,map}=await readSheet(file);const miss=missing(map,['cod','color','talla','qty']);
+    if(miss.length)throw new Error('Faltan columnas obligatorias: '+miss.join(', ')+'.');
+    let skip=0;const rows=[];
+    for(const o of raw){const r=toRow(o,map);if(!r.cod||r.qty<=0){skip++;continue}
+      r.etapa=E10;r.canal='';r.fact='';r.fFact='';r.emb='';r.sb=sbKey();r.brand=S.brand;r.season=S.season;rows.push(r)}
+    busy();if(!rows.length)throw new Error('No se encontraron líneas válidas (Código y Cantidad > 0).');
+    let mode='new';
+    if(S.rows.length){const c=await modal('La temporada ya tiene registros',`<b>${S.season}</b> tiene ${fn(S.rows.length)} filas. El archivo trae ${fn(rows.length)} líneas nuevas.<br><span class="text-slate-500">Anexar conserva las filas ya trabajadas (P24 y DROP). Sobrescribir reinicia la temporada.</span>`,[['Cancelar','c'],['Sobrescribir temporada','o'],['Anexar compra extra','a',1]]);
+      if(c=='c')return;
+      if(c=='o'&&await modal('Confirmar sobrescritura',`Se borrarán las ${fn(S.rows.length)} filas de ${S.brand} ${S.season}. No se puede deshacer.`,[['Cancelar','n'],['Sí, sobrescribir','y',1]])!='y')return;
+      mode=c}
+    busy('Guardando '+fn(rows.length)+' filas…');await tick();
+    if(mode=='o')await dbDelSeason(sbKey());
+    await dbAdd(rows,'Guardando');await reload();busy();
+    modal('Compra cargada',`${fn(rows.length)} líneas en estado 10A (${fn(rows.reduce((a,r)=>a+r.qty,0))} unidades).${skip?`<br>${fn(skip)} filas omitidas por no tener Código o Cantidad.`:''}`)
+  }catch(e){fail('No se pudo cargar la compra',e)}}
+/* ============ MOTOR DE CRUCE (FIFO) ============ */
+async function loadOc(file){
+  try{busy('Leyendo OC…');await tick();
+    const{raw,map}=await readSheet(file);
+    if(!('cod' in map)&&!('sap' in map))throw new Error('Falta la columna Código o SAP.');
+    const miss=missing(map,['color','talla','qty','fact']);if(miss.length)throw new Error('Faltan columnas obligatorias: '+miss.join(', ')+'.');
+    const idx=new Map(),avail=new Map();
+    S.rows.forEach(r=>{if(st(r)=='o'){const k=skuKey(r.cod,r.color,r.talla);(idx.get(k)||idx.set(k,[]).get(k)).push(r);avail.set(r.id,r.qty)}});
+    const plan=[],unm=[];let units=0,lines=0;
+    for(const o of raw){const x=toRow(o,map);x.cod=x.cod||x.sap;if(!x.cod||x.qty<=0||!x.fact)continue;lines++;
+      let rem=x.qty;const list=idx.get(skuKey(x.cod,x.color,x.talla))||[];
+      for(const r of list){if(rem<=0)break;const a=avail.get(r.id);if(a<=0)continue;const t=Math.min(a,rem);plan.push({r,t,x});avail.set(r.id,a-t);rem-=t;units+=t}
+      if(rem>0)unm.push({sku:[x.cod,x.color,x.talla].join(' / '),q:rem,why:list.length?'saldo insuficiente':'SKU no existe en la compra'})}
+    busy();if(!lines)throw new Error('No hay líneas válidas (Código, Cantidad y Factura).');
+    const touched=new Set(plan.map(p=>p.r));let short=0;touched.forEach(r=>short+=avail.get(r.id));
+    const unmHtml=unm.length?`<div class="border border-amber-300 bg-amber-50 rounded p-2"><b>${unm.length} líneas sin cruce completo</b> (${fn(unm.reduce((a,u)=>a+u.q,0))} u.):<ul class="mt-1 text-xs max-h-28 overflow-y-auto">${unm.slice(0,40).map(u=>`<li>${esc(u.sku)} · ${fn(u.q)} u. · ${u.why}</li>`).join('')}</ul></div>`:'';
+    let ch;do{ch=await modal('Cruce de OC trabajada',`<p>${fn(lines)} líneas leídas · <b>${fn(units)} unidades</b> pasarán a P24.</p>${unmHtml}
+      <div class="border rounded p-3"><b>Faltante: ${fn(short)} unidades</b> quedan sin facturar en líneas ya cruzadas.
+      <label class="flex gap-2 mt-2"><input type="radio" name="sh" value="drop" checked><span>Marcar como DROP (saldo 0, va al reporte de cancelaciones)</span></label>
+      <label class="flex gap-2 mt-1"><input type="radio" name="sh" value="keep"><span>Mantener parcial en 10A para una entrega futura</span></label></div>`,[['Cancelar','c'],...(unm.length?[['Descargar no cruzados','dl']]:[]),['Aplicar cruce','ok',1]]);if(ch=='dl')dlUnm(unm)}while(ch=='dl');
+    if(ch!='ok')return;
+    const drop=(document.querySelector('input[name=sh]:checked')||{}).value=='drop';
+    busy('Aplicando cruce…');await tick();
+    const changed=new Set(),added=[];
+    const assign=(r,x)=>{r.etapa=EP;r.ref=x.ref||r.ref;r.canal=(x.canal||'').toUpperCase();r.fact=x.fact;r.fFact=x.fFact;r.emb=x.emb;if(x.fobM>0)r.fob=x.fobM};
+    for(const{r,t,x}of plan){if(t>=r.qty){assign(r,x);changed.add(r)}else{const n={...r,qty:t};delete n.id;assign(n,x);added.push(n);r.qty-=t;changed.add(r)}}
+    if(drop)touched.forEach(r=>{if(r.etapa==E10&&r.qty>0){r.etapa=ED;changed.add(r)}});
+    await dbPut([...changed]);await dbAdd(added);await reload();busy();
+    modal('Cruce aplicado',`${fn(units)} unidades pasaron a P24.${short?`<br>${fn(short)} unidades de faltante ${drop?'enviadas a DROP':'mantenidas en 10A'}.`:''}`)
+  }catch(e){fail('No se pudo procesar la OC',e)}}
+/* ============ EXPORTAR / RESPALDO ============ */
+function dlUnm(u){const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([['SKU / Color / Talla','Unidades sin cruzar','Motivo'],...u.map(x=>[x.sku,x.q,x.why])]),'No cruzados');XLSX.writeFile(wb,`NoCruzados_${S.brand}_${S.season}.xlsx`)}
+function xl(rows,name,drops){
+  const head=[...COLS.map(c=>c[1]),'Canal final'];
+  const aoa=[head,...rows.map(r=>[...COLS.map(c=>r[c[0]]),r.canal||''])];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'EOT');
+  XLSX.writeFile(wb,`${name}_${S.brand}_${S.season}.xlsx`)}
+function exportDrops(){const d=S.rows.filter(r=>st(r)=='d');if(!d.length)return modal('Sin DROPS','Esta temporada no tiene cancelaciones.');
+  const aoa=[['SKU','Descripción','Color','Talla','Canal asignado','Cantidad cancelada','FOB unitario','Total FOB pérdida'],...d.map(r=>[r.cod,r.desc,r.color,r.talla,r.canal||r.ref,r.qty,r.fob,r.qty*r.fob])];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'DROPS');XLSX.writeFile(wb,`DROPS_${S.brand}_${S.season}.xlsx`)}
+function download(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}
+async function backupOut(){busy('Preparando respaldo…');await tick();try{
+  const rows=await rq(db.transaction('rows').objectStore('rows').getAll());
+  download(new Blob([JSON.stringify({v:1,seasons:S.seasons,rows})],{type:'application/json'}),`EOT_respaldo_${new Date().toISOString().slice(0,10)}.json`);busy()}catch(e){fail('Error al exportar',e)}}
+async function backupIn(file){try{
+  const d=JSON.parse(await file.text());if(!d.rows||!d.seasons)throw new Error('El archivo no es un respaldo válido de EOT.');
+  if(await modal('Importar respaldo',`Se reemplazará toda la base actual por ${fn(d.rows.length)} filas del respaldo.`,[['Cancelar','n'],['Importar','y',1]])!='y')return;
+  busy('Importando…');await tick();
+  let t=db.transaction('rows','readwrite');t.objectStore('rows').clear();await txDone(t);
+  await dbAdd(d.rows);S.seasons=d.seasons;S.season=null;await saveMeta();await reload();busy()}catch(e){fail('Error al importar',e)}}
+/* ============ INTERFAZ ============ */
+function render(){renderSide();renderMain();icons()}
+function renderSide(){
+  $('side').innerHTML=Object.keys(S.seasons).map(b=>`<div class="mb-2"><div class="px-5 pt-3 pb-1 text-sm font-semibold text-white">${b}</div>
+    ${S.seasons[b].map(s=>{const on=S.brand==b&&S.season==s;return`<div class="group flex items-center mx-2 rounded ${on?'bg-white/15 text-white':'hover:bg-white/5'}"><button class="flex-1 flex justify-between items-center px-3 py-1.5 text-sm" onclick="pick('${b}','${s}')"><span><i data-lucide="folder" class="inline w-4 h-4 mr-1.5 -mt-0.5"></i>${esc(s)}</span><span class="text-xs num text-slate-400">${fn(S.counts[b+'|'+s])}</span></button><button class="px-2 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-300" title="Eliminar temporada" onclick="delSeason('${b}','${s}')"><i data-lucide="x" class="w-3.5 h-3.5"></i></button></div>`}).join('')}
+    <button class="mx-2 mt-1 px-3 py-1.5 text-sm text-slate-400 hover:text-white" onclick="newSeason('${b}')"><i data-lucide="plus" class="inline w-4 h-4 -mt-0.5"></i> Nueva Temporada</button></div>`).join('')}
+async function pick(b,s){S.brand=b;S.season=s;S.f={q:'',etapa:'',canal:'',fact:''};S.page=1;busy('Cargando…');await tick();await reload();busy()}
+async function newSeason(b){
+  await modal('Nueva temporada en '+b,'<input id="ns" class="border rounded w-full px-3 py-2" placeholder="Ej. FW27" autofocus>',[['Cancelar','n'],['Crear','y',1]]).then(async c=>{
+    if(c!='y')return;const n=$('ns').value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g,'');if(!n)return;
+    if(S.seasons[b].includes(n))return modal('Ya existe','La temporada '+esc(n)+' ya existe en '+b+'.');
+    S.seasons[b].push(n);await saveMeta();await pick(b,n)})}
+async function delSeason(b,s){
+  if(await modal('Eliminar temporada',`Se borrarán ${b} ${s} y sus ${fn(S.counts[b+'|'+s])} registros.`,[['Cancelar','n'],['Eliminar','y',1]])!='y')return;
+  await dbDelSeason(b+'|'+s);S.seasons[b]=S.seasons[b].filter(x=>x!=s);await saveMeta();if(S.brand==b&&S.season==s)S.season=null;await reload()}
+function renderMain(){
+  const m=$('main');
+  if(!S.season){m.innerHTML=`<div class="m-auto text-center max-w-sm px-6"><i data-lucide="package-search" class="w-10 h-10 mx-auto text-slate-400"></i><h1 class="text-xl font-semibold mt-3">Elige una temporada</h1><p class="text-slate-600 mt-1">Selecciona una carpeta en la barra lateral o crea una nueva con “Nueva Temporada” para cargar la compra.</p></div>`;return}
+  const tabs=[['dash','Resumen','layout-dashboard'],['mx','Matriz de seguimiento','table'],['drop','Reporte de DROPS','ban'],['canal','Resumen por canal','git-branch']];
+  m.innerHTML=`<header class="bg-white border-b px-6 pt-4">
+    <div class="flex flex-wrap items-center justify-between gap-3 pb-3"><div><h1 class="text-xl font-semibold">${S.brand} ${esc(S.season)}</h1><p class="text-xs text-slate-500">${fn(S.rows.length)} registros · guardado en este navegador</p></div>
+    <div class="flex gap-2"><button class="btn" onclick="needSeason()&&$('fBuy').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra</button><button class="btn btn-p" onclick="needSeason()&&$('fOc').click()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button></div></div>
+    <div class="flex gap-1 overflow-x-auto">${tabs.map(t=>`<button class="tab whitespace-nowrap ${S.tab==t[0]?'on':''}" onclick="S.tab='${t[0]}';S.page=1;render()"><i data-lucide="${t[2]}" class="inline w-4 h-4 mr-1 -mt-0.5"></i>${t[1]}</button>`).join('')}</div></header>
+    <section class="flex-1 min-h-0 overflow-y-auto p-6" id="view"></section>`;
+  ({dash:vDash,mx:vMx,drop:vDrop,canal:vCanal})[S.tab]()}
+function kpi(l,v,sub,c){return`<div class="bg-white rounded-lg border p-4 ${c||''}"><div class="text-xs text-slate-500">${l}</div><div class="text-2xl font-semibold num !text-left mt-1">${v}</div><div class="text-sm text-slate-600 num !text-left">${sub}</div></div>`}
+function vDash(){
+  const s={t:0,p:0,o:0,d:0,tf:0,pf:0,of:0,df:0};for(const r of S.rows){const k=st(r),v=r.qty*r.fob;s.t+=r.qty;s.tf+=v;s[k]+=r.qty;s[k+'f']+=v}
+  const fr=s.t?s.p/s.t*100:0;
+  $('view').innerHTML=`<div class="grid gap-3 grid-cols-2 xl:grid-cols-5">
+    ${kpi('Unidades compradas',fn(s.t),usd(s.tf)+' FOB')}${kpi('Facturado / P24',fn(s.p),usd(s.pf)+' FOB','border-l-4 border-l-green-600')}
+    ${kpi('Saldo pendiente (10A)',fn(s.o),usd(s.of)+' FOB','border-l-4 border-l-amber-500')}${kpi('Unidades en DROP',fn(s.d),usd(s.df)+' FOB','border-l-4 border-l-red-600')}
+    ${kpi('Fill rate',fr.toFixed(1)+'%','facturado ÷ comprado')}</div>
+    <div class="bg-white rounded-lg border p-5 mt-5"><div class="text-sm font-medium mb-2">Distribución de unidades por etapa</div>
+    <div class="flex h-5 rounded overflow-hidden bg-slate-200"><div style="width:${s.t?s.p/s.t*100:0}%;background:#2f9e5b"></div><div style="width:${s.t?s.o/s.t*100:0}%;background:#e9b13a"></div><div style="width:${s.t?s.d/s.t*100:0}%;background:#c44848"></div></div>
+    <div class="flex gap-5 text-xs text-slate-600 mt-2"><span>P24 ${fn(s.p)}</span><span>10A ${fn(s.o)}</span><span>DROP ${fn(s.d)}</span></div></div>
+    ${S.rows.length?'':'<p class="mt-6 text-slate-600">Aún no hay datos. Usa “Cargar compra” para subir el Excel maestro de esta temporada.</p>'}`}
+function vMx(){
+  const canales=[...new Set(S.rows.map(r=>r.canal).filter(Boolean))].sort();
+  $('view').innerHTML=`<div class="flex flex-wrap gap-2 mb-3">
+    <input id="q" class="border rounded px-3 py-2 text-sm w-64" placeholder="Buscar SKU, descripción o factura" value="${esc(S.f.q)}">
+    <select id="fe" class="border rounded px-2 text-sm"><option value="">Todas las etapas</option><option value="o">10A · Disponible</option><option value="p">P24 · Embarque</option><option value="d">DROP · Cancelado</option></select>
+    <select id="fc" class="border rounded px-2 text-sm"><option value="">Todos los canales</option>${canales.map(c=>`<option>${esc(c)}</option>`).join('')}</select>
+    <input id="ff" class="border rounded px-3 py-2 text-sm w-40" placeholder="Factura" value="${esc(S.f.fact)}">
+    <button class="btn ml-auto" onclick="xl(S.rows,'EOT')"><i data-lucide="file-spreadsheet" class="w-4 h-4"></i>Exportar a Excel</button></div><div id="tbl"></div>`;
+  $('fe').value=S.f.etapa;$('fc').value=S.f.canal;let t;
+  const go=()=>{S.f={q:$('q').value,etapa:$('fe').value,canal:$('fc').value,fact:$('ff').value};S.page=1;clearTimeout(t);t=setTimeout(drawMx,200)};
+  ['q','fe','fc','ff'].forEach(i=>$(i).oninput=go);drawMx()}
+function pager(n){const pages=Math.max(1,Math.ceil(n/S.size));S.page=Math.min(S.page,pages);
+  return`<div class="flex items-center gap-2 text-sm mt-3"><span class="text-slate-600">${fn(n)} filas</span><span class="ml-auto"></span>
+  <select class="border rounded px-2 py-1" onchange="S.size=+this.value;S.page=1;redraw()">${[50,100,200].map(x=>`<option ${x==S.size?'selected':''}>${x}</option>`).join('')}</select>
+  <button class="btn" ${S.page<2?'disabled':''} onclick="S.page--;redraw()">Anterior</button><span>${S.page} / ${pages}</span><button class="btn" ${S.page>=pages?'disabled':''} onclick="S.page++;redraw()">Siguiente</button></div>`}
+const redraw=()=>S.tab=='mx'?drawMx():vDrop();
+function drawMx(){
+  const f=S.f,q=f.q.toLowerCase(),fa=f.fact.toLowerCase();
+  const rows=S.rows.filter(r=>(!f.etapa||st(r)==f.etapa)&&(!f.canal||r.canal==f.canal)&&(!fa||r.fact.toLowerCase().includes(fa))&&(!q||(r.cod+' '+r.desc+' '+r.fact).toLowerCase().includes(q)));
+  const pg=rows.slice((S.page-1)*S.size,S.page*S.size);
+  $('tbl').innerHTML=`<div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 290px)"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-600">
+    ${['Seg.','Código','Descripción','Color','Talla','Etapa','Canal','Ref. compra','Cant.','FOB','Factura','F. factura','Embarque'].map((h,i)=>`<th class="px-3 py-2 whitespace-nowrap ${i==8||i==9?'text-right':''}">${h}</th>`).join('')}</tr></thead><tbody>
+    ${pg.map(r=>`<tr class="r-${st(r)} border-t border-white/60"><td class="px-3 py-1.5">${esc(r.seg)}</td><td class="px-3 py-1.5 font-medium">${esc(r.cod)}</td><td class="px-3 py-1.5 max-w-[16rem] truncate" title="${esc(r.desc)}">${esc(r.desc)}</td><td class="px-3 py-1.5">${esc(r.color)}</td><td class="px-3 py-1.5">${esc(r.talla)}</td><td class="px-3 py-1.5 whitespace-nowrap">${esc(r.etapa.split('-')[0])}</td><td class="px-3 py-1.5">${esc(r.canal)}</td><td class="px-3 py-1.5">${esc(r.ref)}</td><td class="px-3 py-1.5 num">${fn(r.qty)}</td><td class="px-3 py-1.5 num">${r.fob.toFixed(2)}</td><td class="px-3 py-1.5">${esc(r.fact)}</td><td class="px-3 py-1.5 whitespace-nowrap">${esc(r.fFact)}</td><td class="px-3 py-1.5">${esc(r.emb)}</td></tr>`).join('')||'<tr><td colspan="13" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}</tbody></table></div>${pager(rows.length)}`}
+function vDrop(){
+  const d=S.rows.filter(r=>st(r)=='d'),u=d.reduce((a,r)=>a+r.qty,0),f=d.reduce((a,r)=>a+r.qty*r.fob,0);
+  const pg=d.slice((S.page-1)*S.size,S.page*S.size);
+  $('view').innerHTML=`<div class="grid grid-cols-2 gap-3 max-w-xl">${kpi('Unidades perdidas',fn(u),'',' border-l-4 border-l-red-600')}${kpi('FOB cancelado',usd(f),'','border-l-4 border-l-red-600')}</div>
+  <div class="flex justify-end my-3"><button class="btn" onclick="exportDrops()"><i data-lucide="file-spreadsheet" class="w-4 h-4"></i>Exportar reporte de DROPS a Excel</button></div>
+  <div class="bg-white border rounded-lg overflow-auto"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-600">${['SKU','Descripción','Color','Talla','Canal asignado','Cant. cancelada','FOB unit.','Total FOB pérdida'].map((h,i)=>`<th class="px-3 py-2 ${i>4?'text-right':''}">${h}</th>`).join('')}</tr></thead><tbody>
+  ${pg.map(r=>`<tr class="border-t"><td class="px-3 py-1.5 font-medium">${esc(r.cod)}</td><td class="px-3 py-1.5">${esc(r.desc)}</td><td class="px-3 py-1.5">${esc(r.color)}</td><td class="px-3 py-1.5">${esc(r.talla)}</td><td class="px-3 py-1.5">${esc(r.canal||r.ref)}</td><td class="px-3 py-1.5 num">${fn(r.qty)}</td><td class="px-3 py-1.5 num">${r.fob.toFixed(2)}</td><td class="px-3 py-1.5 num">${usd(r.qty*r.fob)}</td></tr>`).join('')||'<tr><td colspan="8" class="p-6 text-center text-slate-500">No hay cancelaciones de marca en esta temporada.</td></tr>'}</tbody></table></div>${pager(d.length)}`;icons()}
+function vCanal(){
+  const g={};S.rows.filter(r=>st(r)=='p').forEach(r=>{const c=r.canal||'SIN CANAL',x=g[c]||(g[c]={q:0,f:0,l:0,inv:new Set()});x.q+=r.qty;x.f+=r.qty*r.fob;x.l++;x.inv.add(r.fact)});
+  const L=Object.entries(g).sort((a,b)=>b[1].q-a[1].q),tot=L.reduce((a,e)=>a+e[1].q,0),mx=L[0]?L[0][1].q:1;
+  $('view').innerHTML=`<div class="bg-white border rounded-lg overflow-auto max-w-4xl"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-600"><th class="px-3 py-2">Canal final</th><th class="px-3 py-2 text-right">Unidades P24</th><th class="px-3 py-2 w-48"></th><th class="px-3 py-2 text-right">% del total</th><th class="px-3 py-2 text-right">FOB</th><th class="px-3 py-2 text-right">Facturas</th><th class="px-3 py-2 text-right">Líneas</th></tr></thead><tbody>
+  ${L.map(([c,x])=>`<tr class="border-t"><td class="px-3 py-2 font-medium">${esc(c)}</td><td class="px-3 py-2 num">${fn(x.q)}</td><td class="px-3 py-2"><div class="h-2 rounded bg-slate-100"><div class="h-2 rounded" style="width:${x.q/mx*100}%;background:#2f9e5b"></div></div></td><td class="px-3 py-2 num">${(x.q/tot*100).toFixed(1)}%</td><td class="px-3 py-2 num">${usd(x.f)}</td><td class="px-3 py-2 num">${x.inv.size}</td><td class="px-3 py-2 num">${fn(x.l)}</td></tr>`).join('')||'<tr><td colspan="7" class="p-6 text-center text-slate-500">Aún no hay unidades en P24. Carga una OC trabajada para ver el reparto por canal.</td></tr>'}</tbody></table></div>`}
+/* ============ ARRANQUE ============ */
+['fBuy','fOc','fBk'].forEach((id,i)=>$(id).onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)[loadBuy,loadOc,backupIn][i](f)});
+(async()=>{try{db=await openDB();const m=await rq(db.transaction('meta').objectStore('meta').get('seasons'));if(m)S.seasons=m;await refreshCounts();render()}
+  catch(e){console.error(e);document.body.innerHTML='<p class="p-8">Error al iniciar la app: '+esc(e.message)+'. Si menciona IndexedDB, evita el modo privado del navegador.</p>'}})();
+</script>
+</body>
+</html>
