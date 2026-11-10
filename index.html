@@ -6,7 +6,7 @@
 <title>EOT · Elastic Order Tracking</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
-  // Silenciar advertencia de Tailwind CDN en consola
+  // Silenciar advertencia de Tailwind CDN en la consola
   const _origWarn = console.warn;
   console.warn = function(...args) {
     if (args[0] && typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
@@ -49,7 +49,7 @@
 </div>
 
 <script>
-/* ============ LAS 37 COLUMNAS MAESTRAS + EMBARQUE ============ */
+/* ============ COLUMNAS MAESTRAS ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
   'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
@@ -69,7 +69,7 @@ const icons = () => { try { window.lucide && lucide.createIcons(); } catch(e){} 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fn = n => Number(n || 0).toLocaleString('es');
 const usd = n => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
-const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '');
 const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
 const sbKey = () => S.brand + '|' + S.season;
@@ -106,7 +106,7 @@ const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.o
 
 function openDB() {
   return new Promise((ok, ko) => {
-    const r = indexedDB.open('eot-db-final', 1);
+    const r = indexedDB.open('eot-db-v4', 1);
     r.onupgradeneeded = () => {
       const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
       s.createIndex('sb', 'sb');
@@ -171,7 +171,7 @@ async function parseExcelFile(file) {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
   const sheet = wb.SheetNames[0];
   const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '', raw: true });
-  if (!raw.length) throw new Error('El archivo no contiene filas legibles.');
+  if (!raw.length) throw new Error('El archivo no contiene filas con datos.');
 
   const fileHeaders = Object.keys(raw[0]);
   const headerMap = {};
@@ -220,9 +220,9 @@ async function loadBuyInitial(file) {
     if (S.rows.length) {
       const c = await modal(
         'Confirmar sobrescritura de temporada',
-        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b>.<br><br>
-        Al cargar como <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
-        <span class="text-xs text-slate-500">Si deseas sumar pedidos adicionales sin borrar nada, usa el botón "Cargar compra extra".</span>`,
+        `La temporada <b>${S.brand} ${S.season}</b> ya cuenta con <b>${fn(S.rows.length)} filas</b>.<br><br>
+        Al cargar una <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
+        <span class="text-xs text-slate-500">Si lo que deseas es sumar pedidos adicionales sin borrar lo anterior, utiliza el botón "Cargar compra extra".</span>`,
         [['Cancelar', 'c'], ['Sí, cargar como compra inicial', 'ok', 'danger']]
       );
       if (c !== 'ok') return;
@@ -248,6 +248,7 @@ async function loadBuyExtra(file) {
     await tick();
     const rows = await parseExcelFile(file);
 
+    // Asegurar que las filas extras entren en estado 10A con campos de facturación limpios
     rows.forEach(r => {
       r['Etapa'] = E10;
       r['Factura'] = '';
@@ -290,7 +291,7 @@ async function clearSeasonData() {
 
   const c2 = await modal(
     'Confirmación de seguridad requerida',
-    `Por favor confirma una vez más que deseas vaciar por completo la temporada <b>${S.brand} ${S.season}</b>.`,
+    `Por favor confirma que realmente deseas vaciar la temporada <b>${S.brand} ${S.season}</b>.`,
     [['Cancelar', 'c'], ['Confirmar y borrar todo', 'yes', 'danger']]
   );
   if (c2 !== 'yes') return;
@@ -524,7 +525,7 @@ function renderMain() {
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
           <button class="btn btn-p" onclick="$('fOc').click()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="exportFullExcel()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
-          <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar compra total</button>
+          <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar temporada</button>
         </div>
       </div>
       <div class="flex gap-1 overflow-x-auto">
@@ -771,4 +772,3 @@ function vCanal() {
 </script>
 </body>
 </html>
-index.html
