@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EOT · Elastic Order Tracking</title>
+<title>EOT · Elastic Order Tracking (Local & Compartible)</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
   const _origWarn = console.warn;
@@ -15,10 +15,6 @@
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.1/dist/umd/lucide.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-
-<!-- Firebase SDK Compat -->
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
 
 <style>
   body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:#eef0ee;color:#18212b}
@@ -40,8 +36,8 @@
       <div class="font-bold text-white text-lg">EOT</div>
       <div class="text-xs text-slate-400">Elastic Order Tracking</div>
     </div>
-    <div id="cloudStatus" class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Conectado a Firebase">
-      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Cloud
+    <div class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Almacenamiento Local en Navegador (IndexedDB)">
+      <span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local
     </div>
   </div>
   <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
@@ -51,30 +47,14 @@
 <input type="file" id="fBuyInit" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fBuyExtra" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fOc" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fJsonImport" accept=".json" class="hidden">
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
 <div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
   <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
 </div>
 
 <script>
-/* ============ CONFIGURACIÓN DE FIREBASE ============ */
-const firebaseConfig = {
-  apiKey: "AIzaSyBQvCoA6p83O12z95pvbOO12hkjmrj5Ssk",
-  authDomain: "embarques-mdp-7c49b.firebaseapp.com",
-  databaseURL: "https://embarques-mdp-7c49b-default-rtdb.firebaseio.com",
-  projectId: "embarques-mdp-7c49b",
-  storageBucket: "embarques-mdp-7c49b.firebasestorage.app",
-  messagingSenderId: "114901426718",
-  appId: "1:114901426718:web:c3cbaf5db203e62c76040f"
-};
-
-if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
-}
-const rtdb = firebase.database();
-const DB_BASE = 'medeport/eot';
-
-/* ============ LAS 30 COLUMNAS MAESTRAS (COLUMNAS VACÍAS PURGADAS) ============ */
+/* ============ LAS 30 COLUMNAS ACTIVAS ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
   'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
@@ -85,6 +65,7 @@ const MASTER_COLS = [
 ];
 const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY'];
 const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
+let db;
 
 const $ = id => document.getElementById(id);
 const icons = () => { try { window.lucide && lucide.createIcons(); } catch(e){} };
@@ -94,7 +75,7 @@ const usd = n => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionD
 const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '');
 const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
-const cleanKey = (b, s) => `${b}_${s}`.replace(/[\.#$\[\]\/]/g, '_');
+const sbKey = () => S.brand + '|' + S.season;
 const busy = m => { $('busyMsg').textContent = m || ''; $('busy').classList.toggle('hidden', !m); };
 const tick = () => new Promise(r => setTimeout(r, 15));
 
@@ -122,98 +103,73 @@ function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
   });
 }
 
-/* ============ OPTIMIZACIÓN DE DATOS (CHUNKS & PAYLOAD) ============ */
-function cleanRowForSave(r) {
-  const o = {};
-  for (const k in r) {
-    const v = r[k];
-    if (v !== '' && v !== null && v !== undefined && v !== 0) {
-      o[k] = v;
-    }
-  }
-  return o;
-}
+/* ============ MOTOR INDEXEDDB DE ALTA VELOCIDAD ============ */
+const rq = r => new Promise((ok, ko) => { r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
+const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.onabort = () => ko(t.error); });
 
-function restoreRow(o, brand, season) {
-  const r = {};
-  MASTER_COLS.forEach(c => {
-    if (NUM_COLS.includes(c)) {
-      r[c] = Number(o[c] || 0);
-    } else {
-      r[c] = o[c] != null ? String(o[c]) : '';
-    }
+function openDB() {
+  return new Promise((ok, ko) => {
+    const r = indexedDB.open('eot-db-local-v2', 1);
+    r.onupgradeneeded = () => {
+      const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
+      s.createIndex('sb', 'sb');
+      r.result.createObjectStore('meta');
+    };
+    r.onsuccess = () => ok(r.result);
+    r.onerror = () => ko(r.error);
   });
-  r.brand = brand;
-  r.season = season;
-  if (!r['Etapa']) r['Etapa'] = E10;
-  return r;
 }
 
-async function uploadRowsInBatches(brand, season, rows, label = 'Guardando en Firebase') {
-  const nodeKey = cleanKey(brand, season);
-  const dataRef = rtdb.ref(`${DB_BASE}/data/${nodeKey}`);
-  
-  await dataRef.remove();
-  
-  const BATCH_SIZE = 1000;
-  const total = rows.length;
-  
-  for (let i = 0; i < total; i += BATCH_SIZE) {
-    const chunk = rows.slice(i, i + BATCH_SIZE);
-    const updates = {};
-    chunk.forEach((r, idx) => {
-      updates[i + idx] = cleanRowForSave(r);
-    });
-    
-    busy(`${label}: ${fn(Math.min(i + BATCH_SIZE, total))} / ${fn(total)} filas…`);
-    await tick();
-    await dataRef.update(updates);
+async function dbAdd(rows, label) {
+  for (let i = 0; i < rows.length; i += 10000) {
+    const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
+    rows.slice(i, i + 10000).forEach(r => s.add(r));
+    await txDone(t);
+    if (label && rows.length > 10000) {
+      busy(label + ' ' + fn(Math.min(i + 10000, rows.length)) + ' / ' + fn(rows.length));
+      await tick();
+    }
   }
-  
-  await rtdb.ref(`${DB_BASE}/counts/${nodeKey}`).set(total);
 }
 
-/* ============ PERSISTENCIA EN FIREBASE ============ */
+async function dbPut(rows) {
+  for (let i = 0; i < rows.length; i += 10000) {
+    const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
+    rows.slice(i, i + 10000).forEach(r => s.put(r));
+    await txDone(t);
+  }
+}
+
+async function dbDelSeason(key) {
+  const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
+  const ks = await rq(s.index('sb').getAllKeys(key));
+  ks.forEach(k => s.delete(k));
+  await txDone(t);
+}
+
+const dbSeason = key => rq(db.transaction('rows').objectStore('rows').index('sb').getAll(key));
+
 async function saveMeta() {
-  await rtdb.ref(`${DB_BASE}/seasons`).set(S.seasons);
+  const t = db.transaction('meta', 'readwrite');
+  t.objectStore('meta').put(S.seasons, 'seasons');
+  await txDone(t);
 }
 
 async function refreshCounts() {
   for (const b in S.seasons) {
     for (const s of S.seasons[b]) {
-      const k = cleanKey(b, s);
-      const snap = await rtdb.ref(`${DB_BASE}/counts/${k}`).once('value');
-      const val = snap.val();
-      if (val !== null) {
-        S.counts[b + '|' + s] = Number(val || 0);
-      } else {
-        const dataSnap = await rtdb.ref(`${DB_BASE}/data/${k}`).once('value');
-        const dVal = dataSnap.val();
-        const cnt = dVal ? (Array.isArray(dVal) ? dVal.length : Object.keys(dVal).length) : 0;
-        S.counts[b + '|' + s] = cnt;
-        await rtdb.ref(`${DB_BASE}/counts/${k}`).set(cnt);
-      }
+      S.counts[b + '|' + s] = await rq(db.transaction('rows').objectStore('rows').index('sb').count(b + '|' + s));
     }
   }
 }
 
 async function reload() {
-  if (!S.season) {
-    S.rows = [];
-  } else {
-    busy('Descargando temporada…');
-    await tick();
-    const snap = await rtdb.ref(`${DB_BASE}/data/${cleanKey(S.brand, S.season)}`).once('value');
-    const val = snap.val();
-    const rawArr = val ? (Array.isArray(val) ? val : Object.values(val)) : [];
-    S.rows = rawArr.map(o => restoreRow(o, S.brand, S.season));
-  }
+  S.rows = S.season ? await dbSeason(sbKey()) : [];
   await refreshCounts();
-  busy();
   render();
 }
 
-/* ============ LECTURA DE EXCEL ============ */
+/* ============ PARSER DE EXCEL (30 COLUMNAS) ============ */
 async function parseExcelFile(file) {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
   const sheet = wb.SheetNames[0];
@@ -243,6 +199,7 @@ async function parseExcelFile(file) {
       }
     });
     if (!r['Etapa']) r['Etapa'] = E10;
+    r.sb = sbKey();
     r.brand = S.brand;
     r.season = S.season;
     if (r['Código'] && r['Cantidad'] > 0) rows.push(r);
@@ -259,17 +216,21 @@ async function loadBuyInitial(file) {
     busy();
     if (S.rows.length) {
       const c = await modal(
-        'Confirmar sobrescritura en Firebase',
-        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b> en la nube.<br><br>
-        Al cargar como <b>Compra Inicial</b> se reemplazará la información por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
-        <span class="text-xs text-slate-500">Este cambio se reflejará al instante para todo el equipo.</span>`,
-        [['Cancelar', 'c'], ['Sí, actualizar en Firebase', 'ok', 'danger']]
+        'Confirmar sobrescritura de temporada',
+        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b>.<br><br>
+        Al cargar como <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
+        <span class="text-xs text-slate-500">Si deseas sumar pedidos adicionales sin borrar nada, usa el botón "Cargar compra extra".</span>`,
+        [['Cancelar', 'c'], ['Sí, cargar como compra inicial', 'ok', 'danger']]
       );
       if (c !== 'ok') return;
     }
-    await uploadRowsInBatches(S.brand, S.season, rows, 'Subiendo compra inicial');
+    busy('Guardando compra inicial…');
+    await tick();
+    await dbDelSeason(sbKey());
+    await dbAdd(rows, 'Guardando');
     await reload();
-    modal('Base Sincronizada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
+    busy();
+    modal('Compra Inicial Cargada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
   } catch(e) {
     busy();
     modal('Error al cargar compra inicial', esc(e.message || e));
@@ -290,16 +251,18 @@ async function loadBuyExtra(file) {
     });
     busy();
     const c = await modal(
-      'Anexar compra extra a Firebase',
+      'Anexar compra extra',
       `Se sumarán <b>${fn(rows.length)} filas nuevas</b> a <b>${S.brand} ${S.season}</b>.<br><br>
-      Las filas previas (incluyendo P24 y DROPs) permanecerán intactas.`,
+      Tus filas previas (incluidas las que ya tienen P24 y DROPs) permanecerán intactas.`,
       [['Cancelar', 'c'], ['Anexar compra', 'ok', 1]]
     );
     if (c !== 'ok') return;
-    const updatedRows = [...S.rows, ...rows];
-    await uploadRowsInBatches(S.brand, S.season, updatedRows, 'Anexando a Firebase');
+    busy('Anexando filas a la base…');
+    await tick();
+    await dbAdd(rows, 'Guardando');
     await reload();
-    modal('Compra Extra Guardada', `Se anexaron ${fn(rows.length)} filas en estado 10A a la base compartida.`);
+    busy();
+    modal('Compra Extra Anexada', `Se añadieron ${fn(rows.length)} filas en estado 10A a la temporada.`);
   } catch(e) {
     busy();
     modal('Error al anexar compra extra', esc(e.message || e));
@@ -310,28 +273,27 @@ async function loadBuyExtra(file) {
 async function clearSeasonData() {
   if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada.');
   const c1 = await modal(
-    '¿Borrar compra de Firebase?',
-    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b> en la nube.<br><br>
-    Esta acción reinicia la temporada a 0 filas para ti y tus compañeros.`,
+    '¿Borrar toda la compra de la temporada?',
+    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b>.<br><br>
+    Esta acción reinicia la temporada a 0 filas.`,
     [['Cancelar', 'c'], ['Continuar con el borrado', 'next', 'danger']]
   );
   if (c1 !== 'next') return;
   const c2 = await modal(
     'Confirmación de seguridad requerida',
-    `Confirma nuevamente que deseas vaciar por completo la temporada <b>${S.brand} ${S.season}</b> de Firebase.`,
+    `Por favor confirma una vez más que deseas vaciar por completo la temporada <b>${S.brand} ${S.season}</b>.`,
     [['Cancelar', 'c'], ['Confirmar y borrar todo', 'yes', 'danger']]
   );
   if (c2 !== 'yes') return;
-  busy('Eliminando registros de Firebase…');
+  busy('Borrando registros…');
   await tick();
-  const k = cleanKey(S.brand, S.season);
-  await rtdb.ref(`${DB_BASE}/data/${k}`).remove();
-  await rtdb.ref(`${DB_BASE}/counts/${k}`).set(0);
+  await dbDelSeason(sbKey());
   await reload();
-  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b> en Firebase.`);
+  busy();
+  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
 }
 
-/* ============ 4. CRUCE DE OC TRABAJADA ============ */
+/* ============ 4. CRUCE DE OC TRABAJADA (SIN LÍMITE DE TAMAÑO) ============ */
 async function loadOc(file) {
   try {
     busy('Leyendo archivo de OC…');
@@ -357,6 +319,7 @@ async function loadOc(file) {
       }
     });
 
+    const changed = new Set();
     const added = [];
     let matchedUnits = 0;
     let matchedLines = 0;
@@ -394,8 +357,10 @@ async function loadOc(file) {
           if (o['Color']) baseRow['Color'] = o['Color'];
           if (embFinal) baseRow['EMBARQUE'] = embFinal;
           if (o['Fecha de factura']) baseRow['Fecha de factura'] = fdate(o['Fecha de factura']);
+          changed.add(baseRow);
         } else {
           const facturada = { ...baseRow };
+          delete facturada.id;
           facturada['Cantidad'] = rem;
           facturada['Etapa'] = EP;
           if (fact) facturada['Factura'] = fact;
@@ -403,10 +368,10 @@ async function loadOc(file) {
           if (o['Color']) facturada['Color'] = o['Color'];
           if (embFinal) facturada['EMBARQUE'] = embFinal;
           if (o['Fecha de factura']) facturada['Fecha de factura'] = fdate(o['Fecha de factura']);
-
           baseRow['Cantidad'] -= rem;
           matchedUnits += rem;
           rem = 0;
+          changed.add(baseRow);
           added.push(facturada);
         }
       }
@@ -415,16 +380,19 @@ async function loadOc(file) {
 
     busy();
     const ch = await modal(
-      'Confirmar cruce de OC en la nube',
+      'Confirmar cruce de OC',
       `<p>Se cruzaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasarán a P24 con su información de Embarque.</p>
-      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en la compra inicial.</p>` : ''}`,
-      [['Cancelar', 'c'], ['Actualizar base compartida', 'ok', 1]]
+      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo en la compra inicial.</p>` : ''}`,
+      [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
     );
     if (ch !== 'ok') return;
 
-    const finalRows = [...S.rows, ...added];
-    await uploadRowsInBatches(S.brand, S.season, finalRows, 'Actualizando cruce en Firebase');
+    busy('Actualizando base de datos local…');
+    await tick();
+    await dbPut([...changed]);
+    if (added.length) await dbAdd(added);
     await reload();
+    busy();
     modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b>.`);
   } catch(e) {
     busy();
@@ -432,10 +400,90 @@ async function loadOc(file) {
   }
 }
 
-/* ============ 5. EXPORTACIÓN EXCEL ============ */
+/* ============ 5. EXPORTAR / IMPORTAR RESPALDO JSON COMPARTIBLE ============ */
+function exportJsonBackup() {
+  if (!S.rows.length) return modal('Sin datos', 'No hay datos en esta temporada para exportar.');
+  busy('Generando archivo JSON…');
+  setTimeout(() => {
+    const payload = {
+      app: 'EOT_MEDEPORT',
+      version: '2.0',
+      brand: S.brand,
+      season: S.season,
+      exportedAt: new Date().toISOString(),
+      rowCount: S.rows.length,
+      rows: S.rows.map(r => {
+        const o = { ...r };
+        delete o.id; // Clave auto-incremental regenerada al importar
+        return o;
+      })
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `EOT_${S.brand}_${S.season}_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    busy();
+  }, 50);
+}
+
+async function importJsonBackup(file) {
+  try {
+    busy('Leyendo archivo JSON…');
+    await tick();
+    const text = await file.text();
+    const data = JSON.parse(text);
+
+    if (!data.rows || !Array.isArray(data.rows)) {
+      throw new Error('El archivo JSON no tiene el formato de respaldo válido de EOT.');
+    }
+
+    const b = data.brand || S.brand;
+    const s = data.season || S.season;
+    const count = data.rows.length;
+
+    busy();
+    const c = await modal(
+      'Importar respaldo JSON',
+      `El archivo contiene <b>${fn(count)} filas</b> correspondientes a <b>${b} ${s}</b>.<br><br>
+      ¿Deseas cargar estos datos en tu navegador? Se reemplazarán los registros actuales de esa temporada.`,
+      [['Cancelar', 'c'], ['Sí, importar datos', 'ok', 1]]
+    );
+    if (c !== 'ok') return;
+
+    // Asegurar temporada en el selector si no existe
+    if (!S.seasons[b]) S.seasons[b] = [];
+    if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
+    await saveMeta();
+
+    S.brand = b;
+    S.season = s;
+    const targetKey = b + '|' + s;
+
+    busy('Guardando datos en la base local…');
+    await tick();
+    await dbDelSeason(targetKey);
+    
+    // Normalizar filas asegurando sbKey
+    const cleanRows = data.rows.map(r => ({ ...r, sb: targetKey, brand: b, season: s }));
+    await dbAdd(cleanRows, 'Importando');
+    await reload();
+    busy();
+    modal('Respaldo Importado', `Se cargaron con éxito ${fn(count)} filas en <b>${b} ${s}</b>.`);
+  } catch(e) {
+    busy();
+    modal('Error al importar JSON', esc(e.message || e));
+  }
+}
+
+/* ============ 6. EXPORTACIONES EXCEL (30 COLUMNAS) ============ */
 function exportFullExcel() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
-  busy('Generando archivo Excel desde Firebase…');
+  busy('Generando archivo Excel con las 30 columnas maestras…');
   setTimeout(() => {
     const aoa = [MASTER_COLS];
     S.rows.forEach(r => {
@@ -490,7 +538,10 @@ function renderSide() {
 async function pick(b, s) {
   S.brand = b; S.season = s;
   S.page = 1;
+  busy('Cargando…');
+  await tick();
   await reload();
+  busy();
 }
 
 async function newSeason(b) {
@@ -523,13 +574,15 @@ function renderMain() {
       <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
         <div>
           <h1 class="text-xl font-semibold">${S.brand} ${esc(S.season)}</h1>
-          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Sincronizado en Firebase Realtime Database</p>
+          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
           <button class="btn btn-p" onclick="$('fOc').click()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="exportFullExcel()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
+          <button class="btn !bg-indigo-700 !text-white !border-indigo-700" onclick="exportJsonBackup()"><i data-lucide="file-json" class="w-4 h-4"></i>Exportar JSON</button>
+          <button class="btn !bg-indigo-50 !text-indigo-800 !border-indigo-300" onclick="$('fJsonImport').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar JSON</button>
           <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar compra total</button>
         </div>
       </div>
@@ -758,31 +811,21 @@ function vCanal() {
   if (f) [loadBuyInitial, loadBuyExtra, loadOc][i](f);
 });
 
+$('fJsonImport').onchange = e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) importJsonBackup(f);
+};
+
 (async () => {
   try {
-    busy('Conectando con Firebase…');
-    const metaSnap = await rtdb.ref(`${DB_BASE}/seasons`).once('value');
-    const m = metaSnap.val();
-    if (m) {
-      S.seasons = m;
-    } else {
-      await saveMeta();
-    }
-
-    rtdb.ref(`${DB_BASE}/seasons`).on('value', snap => {
-      const updated = snap.val();
-      if (updated) {
-        S.seasons = updated;
-        renderSide();
-      }
-    });
-
-    await reload();
+    db = await openDB();
+    const m = await rq(db.transaction('meta').objectStore('meta').get('seasons'));
+    if (m) S.seasons = m;
+    await refreshCounts();
+    render();
   } catch(e) {
-    busy();
-    $('cloudStatus').innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span> Desconectado';
-    $('cloudStatus').className = 'flex items-center gap-1.5 text-[11px] text-red-400 font-medium bg-red-950/60 border border-red-500/30 px-2 py-0.5 rounded-full';
-    modal('Error de conexión a Firebase', 'No se pudo conectar a la base de datos: ' + esc(e.message));
+    document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB: ' + esc(e.message) + '</p>';
   }
 })();
 </script>
