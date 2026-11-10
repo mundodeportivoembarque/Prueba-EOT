@@ -22,6 +22,7 @@
   thead th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:0 1px 0 #d5d9d6}
   .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .8rem;border-radius:.375rem;font-size:.85rem;font-weight:500;border:1px solid #c9cfcb;background:#fff}
   .btn:hover{background:#f3f5f3}.btn-p{background:#243b6b;color:#fff;border-color:#243b6b}.btn-p:hover{background:#1c2f57}
+  .btn-danger{background:#fff;color:#b91c1c;border-color:#fca5a5}.btn-danger:hover{background:#fef2f2}
   .tab{padding:.6rem 1rem;font-size:.9rem;font-weight:500;border-bottom:2px solid transparent;color:#5b6670}
   .tab.on{border-color:#243b6b;color:#243b6b}
   .r-p{background:#e8f5ec}.r-o{background:#fff7e0}.r-d{background:#f4e4e4;color:#6b5555}
@@ -30,22 +31,25 @@
 </head>
 <body class="h-screen flex overflow-hidden">
 <aside class="w-64 shrink-0 flex flex-col text-slate-200" style="background:#16212e">
-  <div class="px-5 py-4 border-b border-white/10"><div class="font-bold text-white text-lg">EOT</div><div class="text-xs text-slate-400">Elastic Order Tracking</div></div>
-  <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
-  <div class="p-3 border-t border-white/10 grid grid-cols-2 gap-2">
-    <button class="btn !bg-transparent !text-slate-200 !border-white/20 justify-center" onclick="backupOut()"><i data-lucide="download" class="w-4 h-4"></i>Respaldo</button>
-    <button class="btn !bg-transparent !text-slate-200 !border-white/20 justify-center" onclick="document.getElementById('fBk').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar</button>
+  <div class="px-5 py-4 border-b border-white/10">
+    <div class="font-bold text-white text-lg">EOT</div>
+    <div class="text-xs text-slate-400">Elastic Order Tracking</div>
   </div>
+  <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
 </aside>
 <main id="main" class="flex-1 min-w-0 flex flex-col"></main>
-<input type="file" id="fBuy" accept=".xlsx,.xls,.csv" class="hidden">
+
+<input type="file" id="fBuyInit" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fBuyExtra" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fOc" accept=".xlsx,.xls,.csv" class="hidden">
-<input type="file" id="fBk" accept=".json" class="hidden">
+
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
-<div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium"><span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span></div>
+<div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
+  <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
+</div>
 
 <script>
-/* ============ COLUMNAS MAESTRAS (INCLUYE EMBARQUE) ============ */
+/* ============ COLUMNAS MAESTRAS ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
   'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
@@ -57,7 +61,7 @@ const MASTER_COLS = [
 ];
 
 const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY'];
-const S = { brand: 'Reebok', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '', fact: '' }, page: 1, size: 50 };
+const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
 let db;
 
 const $ = id => document.getElementById(id);
@@ -85,7 +89,7 @@ function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
       <h3 class="text-lg font-semibold mb-3">${title}</h3>
       <div class="text-sm space-y-3">${body}</div>
       <div class="flex justify-end gap-2 mt-5">
-        ${btns.map(b => `<button data-b="${b[1]}" class="btn ${b[2] ? 'btn-p' : ''}">${b[0]}</button>`).join('')}
+        ${btns.map(b => `<button data-b="${b[1]}" class="btn ${b[2] === 'danger' ? '!bg-red-700 !text-white !border-red-700' : b[2] ? 'btn-p' : ''}">${b[0]}</button>`).join('')}
       </div>
     </div>`;
     m.classList.remove('hidden');
@@ -102,7 +106,7 @@ const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.o
 
 function openDB() {
   return new Promise((ok, ko) => {
-    const r = indexedDB.open('eot-db-v3', 1);
+    const r = indexedDB.open('eot-db-v4', 1);
     r.onupgradeneeded = () => {
       const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
       s.createIndex('sb', 'sb');
@@ -163,83 +167,144 @@ async function reload() {
 }
 
 /* ============ LECTURA DE EXCEL ============ */
-async function readSheet(file, sheetName = null) {
+async function parseExcelFile(file) {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-  const sheet = sheetName && wb.Sheets[sheetName] ? sheetName : wb.SheetNames[0];
+  const sheet = wb.SheetNames[0];
   const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '', raw: true });
-  if (!raw.length) throw new Error('El archivo no contiene filas legibles.');
-  return { raw, wb };
-}
+  if (!raw.length) throw new Error('El archivo no contiene filas con datos.');
 
-/* ============ CARGA DE COMPRA MAESTRA ============ */
-async function loadBuy(file) {
-  try {
-    busy('Leyendo archivo de seguimiento…');
-    await tick();
-    const { raw } = await readSheet(file);
+  const fileHeaders = Object.keys(raw[0]);
+  const headerMap = {};
+  MASTER_COLS.forEach(mCol => {
+    const nCol = norm(mCol);
+    const found = fileHeaders.find(h => norm(h) === nCol);
+    if (found) headerMap[mCol] = found;
+  });
 
-    const fileHeaders = Object.keys(raw[0]);
-    const headerMap = {};
-    MASTER_COLS.forEach(mCol => {
-      const nCol = norm(mCol);
-      const found = fileHeaders.find(h => norm(h) === nCol);
-      if (found) headerMap[mCol] = found;
+  if (!headerMap['Código'] || !headerMap['Cantidad']) {
+    throw new Error('El archivo debe incluir obligatoriamente las columnas "Código" y "Cantidad".');
+  }
+
+  const rows = [];
+  for (const o of raw) {
+    const r = {};
+    MASTER_COLS.forEach(col => {
+      const val = headerMap[col] ? o[headerMap[col]] : '';
+      if (NUM_COLS.includes(col)) {
+        r[col] = Number(String(val || 0).replace(',', '.')) || 0;
+      } else if (col.includes('Fecha')) {
+        r[col] = fdate(val);
+      } else {
+        r[col] = val == null ? '' : String(val).trim();
+      }
     });
 
-    if (!headerMap['Código'] || !headerMap['Cantidad']) {
-      throw new Error('El archivo debe tener al menos las columnas "Código" y "Cantidad".');
-    }
+    if (!r['Etapa']) r['Etapa'] = E10;
 
-    const rows = [];
-    for (const o of raw) {
-      const r = {};
-      MASTER_COLS.forEach(col => {
-        const val = headerMap[col] ? o[headerMap[col]] : '';
-        if (NUM_COLS.includes(col)) {
-          r[col] = Number(String(val || 0).replace(',', '.')) || 0;
-        } else if (col.includes('Fecha')) {
-          r[col] = fdate(val);
-        } else {
-          r[col] = val == null ? '' : String(val).trim();
-        }
-      });
+    r.sb = sbKey();
+    r.brand = S.brand;
+    r.season = S.season;
+    if (r['Código'] && r['Cantidad'] > 0) rows.push(r);
+  }
+  return rows;
+}
 
-      if (!r['Etapa']) r['Etapa'] = E10;
-
-      r.sb = sbKey();
-      r.brand = S.brand;
-      r.season = S.season;
-      if (r['Código'] && r['Cantidad'] > 0) rows.push(r);
-    }
+/* ============ 1. CARGA COMPRA INICIAL ============ */
+async function loadBuyInitial(file) {
+  try {
+    busy('Leyendo compra inicial…');
+    await tick();
+    const rows = await parseExcelFile(file);
 
     busy();
-    let mode = 'new';
     if (S.rows.length) {
       const c = await modal(
-        'La temporada ya tiene registros',
-        `Actualmente hay ${fn(S.rows.length)} filas. El archivo trae ${fn(rows.length)} filas.<br><br>
-        <b>Anexar:</b> Agrega compras extras sin tocar lo que ya tienes.<br>
-        <b>Sobrescribir:</b> Carga este archivo como la nueva base maestra.`,
-        [['Cancelar', 'c'], ['Sobrescribir base', 'o'], ['Anexar compra extra', 'a', 1]]
+        'Confirmar sobrescritura de temporada',
+        `La temporada <b>${S.brand} ${S.season}</b> ya cuenta con <b>${fn(S.rows.length)} filas</b>.<br><br>
+        Al cargar una <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
+        <span class="text-xs text-slate-500">Si lo que deseas es sumar pedidos adicionales sin borrar lo anterior, utiliza el botón "Cargar compra extra".</span>`,
+        [['Cancelar', 'c'], ['Sí, cargar como compra inicial', 'ok', 'danger']]
       );
-      if (c === 'c') return;
-      mode = c;
+      if (c !== 'ok') return;
     }
 
-    busy('Guardando datos en la base local…');
+    busy('Guardando compra inicial…');
     await tick();
-    if (mode === 'o') await dbDelSeason(sbKey());
+    await dbDelSeason(sbKey());
     await dbAdd(rows, 'Guardando');
     await reload();
     busy();
-    modal('Base cargada con éxito', `${fn(rows.length)} filas listas en ${S.brand} ${S.season}.`);
+    modal('Compra Inicial Cargada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
   } catch(e) {
     busy();
-    modal('Error al cargar archivo', esc(e.message || e));
+    modal('Error al cargar compra inicial', esc(e.message || e));
   }
 }
 
-/* ============ CRUCE DE OC TRABAJADA (CAPTURA EMBARQUE) ============ */
+/* ============ 2. CARGA COMPRA EXTRA ============ */
+async function loadBuyExtra(file) {
+  try {
+    busy('Leyendo compra extra…');
+    await tick();
+    const rows = await parseExcelFile(file);
+
+    // Asegurar que las filas extras entren en estado 10A con campos de facturación limpios
+    rows.forEach(r => {
+      r['Etapa'] = E10;
+      r['Factura'] = '';
+      r['Fecha de factura'] = '';
+      r['EMBARQUE'] = '';
+    });
+
+    busy();
+    const c = await modal(
+      'Anexar compra extra',
+      `Se sumarán <b>${fn(rows.length)} filas nuevas</b> a <b>${S.brand} ${S.season}</b>.<br><br>
+      Tus filas previas (incluidas las que ya tienen P24 y DROPs) permanecerán intactas.`,
+      [['Cancelar', 'c'], ['Anexar compra', 'ok', 1]]
+    );
+    if (c !== 'ok') return;
+
+    busy('Anexando filas a la base…');
+    await tick();
+    await dbAdd(rows, 'Guardando');
+    await reload();
+    busy();
+    modal('Compra Extra Anexada', `Se añadieron ${fn(rows.length)} filas en estado 10A a la temporada.`);
+  } catch(e) {
+    busy();
+    modal('Error al anexar compra extra', esc(e.message || e));
+  }
+}
+
+/* ============ 3. BORRAR COMPRA TOTAL ============ */
+async function clearSeasonData() {
+  if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada.');
+
+  const c1 = await modal(
+    '¿Borrar toda la compra de la temporada?',
+    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b>.<br><br>
+    Esta acción reinicia la temporada a 0 filas y no se puede deshacer.`,
+    [['Cancelar', 'c'], ['Continuar con el borrado', 'next', 'danger']]
+  );
+  if (c1 !== 'next') return;
+
+  const c2 = await modal(
+    'Confirmación de seguridad requerida',
+    `Por favor confirma que realmente deseas vaciar la temporada <b>${S.brand} ${S.season}</b>.`,
+    [['Cancelar', 'c'], ['Confirmar y borrar todo', 'yes', 'danger']]
+  );
+  if (c2 !== 'yes') return;
+
+  busy('Borrando registros de la temporada…');
+  await tick();
+  await dbDelSeason(sbKey());
+  await reload();
+  busy();
+  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
+}
+
+/* ============ 4. CRUCE DE OC TRABAJADA ============ */
 async function loadOc(file) {
   try {
     busy('Leyendo archivo de OC…');
@@ -250,7 +315,6 @@ async function loadOc(file) {
 
     if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC.');
 
-    // 1. Indexar filas disponibles en 10A
     const exactIndex = new Map();
     const skuTallaIndex = new Map();
 
@@ -284,8 +348,6 @@ async function loadOc(file) {
       const qty = Number(String(o['Cantidad'] || o['QTY'] || 0).replace(',', '.')) || 0;
       const fact = String(o['Factura'] || o['No FACTURA '] || '').trim();
       const refFinal = String(o['Referencia compra'] || o['CANAL'] || '').trim();
-      
-      // Captura de columna EMBARQUE desde cualquier variante de encabezado de la OC
       const embFinal = String(o['EMBARQUE'] || o['Embarque'] || o['Nº de embarque'] || o['EMBARQUES'] || '').trim();
 
       if (!cod || qty <= 0) continue;
@@ -306,7 +368,6 @@ async function loadOc(file) {
         if (baseRow['Cantidad'] <= 0 || baseRow['Etapa'].startsWith('P24')) continue;
 
         if (baseRow['Cantidad'] <= rem) {
-          // Cubre la fila completa -> Pasa a P24
           rem -= baseRow['Cantidad'];
           matchedUnits += baseRow['Cantidad'];
           baseRow['Etapa'] = EP;
@@ -317,7 +378,6 @@ async function loadOc(file) {
           if (o['Fecha de factura']) baseRow['Fecha de factura'] = fdate(o['Fecha de factura']);
           changed.add(baseRow);
         } else {
-          // Entrega parcial: Bifurcación (Split)
           const facturada = { ...baseRow };
           delete facturada.id;
           facturada['Cantidad'] = rem;
@@ -362,10 +422,10 @@ async function loadOc(file) {
   }
 }
 
-/* ============ EXPORTACIÓN EXCEL COMPLETA ============ */
+/* ============ 5. EXPORTACIÓN EXCEL COMPLETA ============ */
 function exportFullExcel() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
-  busy('Generando archivo Excel con las columnas maestras y Embarque…');
+  busy('Generando archivo Excel con las 37 columnas maestras…');
   setTimeout(() => {
     const aoa = [MASTER_COLS];
     S.rows.forEach(r => {
@@ -380,7 +440,7 @@ function exportFullExcel() {
 
 function exportDrops() {
   const d = S.rows.filter(r => st(r) === 'd');
-  if (!d.length) return modal('Sin DROPS', 'No hay registros cancelados (DROP) en esta temporada.');
+  if (!d.length) return modal('Sin DROPS', 'No hay cancelaciones (DROP) en esta temporada.');
   const aoa = [
     ['Código', 'Descripción', 'Color', 'Talla', 'Referencia / Canal', 'EMBARQUE', 'Cantidad', 'FOB Unitario', 'FOB Pérdida'],
     ...d.map(r => [r['Código'], r['Descripción'], r['Color'], r['Talla'], r['Referencia compra'], r['EMBARQUE'], r['Cantidad'], r['FOB'], r['Cantidad'] * r['FOB']])
@@ -388,40 +448,6 @@ function exportDrops() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'DROPS');
   XLSX.writeFile(wb, `DROPS_${S.brand}_${S.season}.xlsx`);
-}
-
-function backupOut() {
-  busy('Exportando respaldo…');
-  rq(db.transaction('rows').objectStore('rows').getAll()).then(rows => {
-    const blob = new Blob([JSON.stringify({ seasons: S.seasons, rows })], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `EOT_BACKUP_${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    busy();
-  });
-}
-
-function backupIn(file) {
-  file.text().then(async txt => {
-    try {
-      const data = JSON.parse(txt);
-      if (!data.rows) throw new Error('Respaldo no válido');
-      busy('Restaurando datos…');
-      const t = db.transaction('rows', 'readwrite');
-      t.objectStore('rows').clear();
-      await txDone(t);
-      await dbAdd(data.rows);
-      S.seasons = data.seasons || S.seasons;
-      await saveMeta();
-      await reload();
-      busy();
-      modal('Restauración completa', 'Todos los datos fueron cargados con éxito.');
-    } catch(e) {
-      busy();
-      modal('Error', 'No se pudo leer el archivo de respaldo.');
-    }
-  });
 }
 
 /* ============ INTERFAZ Y VISTAS ============ */
@@ -494,10 +520,12 @@ function renderMain() {
           <h1 class="text-xl font-semibold">${S.brand} ${esc(S.season)}</h1>
           <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
         </div>
-        <div class="flex gap-2">
-          <button class="btn" onclick="$('fBuy').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compras / situación</button>
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
+          <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
           <button class="btn btn-p" onclick="$('fOc').click()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="exportFullExcel()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
+          <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar temporada</button>
         </div>
       </div>
       <div class="flex gap-1 overflow-x-auto">
@@ -570,7 +598,6 @@ function vMx() {
         <option value="">Todos los canales</option>
         ${canales.map(c => `<option>${esc(c)}</option>`).join('')}
       </select>
-      <button class="btn ml-auto !bg-emerald-700 !text-white" onclick="exportFullExcel()"><i data-lucide="file-spreadsheet" class="w-4 h-4"></i>Exportar Excel Completo</button>
     </div>
     <div id="tbl"></div>
   `;
@@ -579,7 +606,7 @@ function vMx() {
 
   let t;
   const go = () => {
-    S.f = { q: $('q').value, etapa: $('fe').value, canal: $('fc').value, fact: '' };
+    S.f = { q: $('q').value, etapa: $('fe').value, canal: $('fc').value };
     S.page = 1;
     clearTimeout(t);
     t = setTimeout(drawMx, 200);
@@ -622,7 +649,7 @@ function drawMx() {
               <td class="px-3 py-1.5 whitespace-nowrap">${esc(r['Fecha de factura'])}</td>
               <td class="px-3 py-1.5 font-semibold text-slate-700 whitespace-nowrap">${esc(r['EMBARQUE'] || '')}</td>
             </tr>
-          `).join('') || '<tr><td colspan="13" class="p-6 text-center text-slate-500">Sin resultados.</td></tr>'}
+          `).join('') || '<tr><td colspan="13" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -725,10 +752,10 @@ function vCanal() {
 }
 
 /* ============ INICIALIZACIÓN ============ */
-['fBuy', 'fOc', 'fBk'].forEach((id, i) => $(id).onchange = e => {
+['fBuyInit', 'fBuyExtra', 'fOc'].forEach((id, i) => $(id).onchange = e => {
   const f = e.target.files[0];
   e.target.value = '';
-  if (f) [loadBuy, loadOc, backupIn][i](f);
+  if (f) [loadBuyInitial, loadBuyExtra, loadOc][i](f);
 });
 
 (async () => {
