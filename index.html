@@ -1,1 +1,773 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EOT · Elastic Order Tracking</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  // Silenciar advertencia de Tailwind CDN en consola
+  const _origWarn = console.warn;
+  console.warn = function(...args) {
+    if (args[0] && typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
+    _origWarn.apply(console, args);
+  };
+</script>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.263.1/dist/umd/lucide.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:#eef0ee;color:#18212b}
+  .num{font-variant-numeric:tabular-nums;text-align:right}
+  thead th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:0 1px 0 #d5d9d6}
+  .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .8rem;border-radius:.375rem;font-size:.85rem;font-weight:500;border:1px solid #c9cfcb;background:#fff}
+  .btn:hover{background:#f3f5f3}.btn-p{background:#243b6b;color:#fff;border-color:#243b6b}.btn-p:hover{background:#1c2f57}
+  .btn-danger{background:#fff;color:#b91c1c;border-color:#fca5a5}.btn-danger:hover{background:#fef2f2}
+  .tab{padding:.6rem 1rem;font-size:.9rem;font-weight:500;border-bottom:2px solid transparent;color:#5b6670}
+  .tab.on{border-color:#243b6b;color:#243b6b}
+  .r-p{background:#e8f5ec}.r-o{background:#fff7e0}.r-d{background:#f4e4e4;color:#6b5555}
+  :focus-visible{outline:2px solid #243b6b;outline-offset:2px}
+</style>
+</head>
+<body class="h-screen flex overflow-hidden">
+<aside class="w-64 shrink-0 flex flex-col text-slate-200" style="background:#16212e">
+  <div class="px-5 py-4 border-b border-white/10">
+    <div class="font-bold text-white text-lg">EOT</div>
+    <div class="text-xs text-slate-400">Elastic Order Tracking</div>
+  </div>
+  <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
+</aside>
+<main id="main" class="flex-1 min-w-0 flex flex-col"></main>
 
+<input type="file" id="fBuyInit" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fBuyExtra" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fOc" accept=".xlsx,.xls,.csv" class="hidden">
+
+<div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
+<div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
+  <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
+</div>
+
+<script>
+/* ============ LAS 37 COLUMNAS MAESTRAS + EMBARQUE ============ */
+const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
+const MASTER_COLS = [
+  'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
+  'Código', 'Color', 'Talla', 'Talla marca', 'Eancode', 'Descripción', 'Género', 'Código JDE',
+  'Fecha de entrega', 'Fecha de venta', 'Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY',
+  'Etapa', 'Subetapa', 'Nº documento', 'Documento', 'EMBARQUE', 'Nº de embarque', 'Fecha estimada inicio',
+  'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura',
+  'Fecha salida embarque', 'Fecha llegada embarque', 'Fecha ingreso depósito'
+];
+
+const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY'];
+const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
+let db;
+
+const $ = id => document.getElementById(id);
+const icons = () => { try { window.lucide && lucide.createIcons(); } catch(e){} };
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fn = n => Number(n || 0).toLocaleString('es');
+const usd = n => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
+const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '');
+const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
+const sbKey = () => S.brand + '|' + S.season;
+const busy = m => { $('busyMsg').textContent = m || ''; $('busy').classList.toggle('hidden', !m); };
+const tick = () => new Promise(r => setTimeout(r, 20));
+
+function fdate(v) {
+  if (!v) return '';
+  if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
+  return String(v).trim();
+}
+
+function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
+  return new Promise(res => {
+    const m = $('modal');
+    m.innerHTML = `<div class="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+      <h3 class="text-lg font-semibold mb-3">${title}</h3>
+      <div class="text-sm space-y-3">${body}</div>
+      <div class="flex justify-end gap-2 mt-5">
+        ${btns.map(b => `<button data-b="${b[1]}" class="btn ${b[2] === 'danger' ? '!bg-red-700 !text-white !border-red-700' : b[2] ? 'btn-p' : ''}">${b[0]}</button>`).join('')}
+      </div>
+    </div>`;
+    m.classList.remove('hidden');
+    m.onclick = e => {
+      const b = e.target.closest('[data-b]');
+      if (b) { m.classList.add('hidden'); res(b.dataset.b); }
+    };
+  });
+}
+
+/* ============ INDEXEDDB ============ */
+const rq = r => new Promise((ok, ko) => { r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
+const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.onabort = () => ko(t.error); });
+
+function openDB() {
+  return new Promise((ok, ko) => {
+    const r = indexedDB.open('eot-db-final', 1);
+    r.onupgradeneeded = () => {
+      const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
+      s.createIndex('sb', 'sb');
+      r.result.createObjectStore('meta');
+    };
+    r.onsuccess = () => ok(r.result);
+    r.onerror = () => ko(r.error);
+  });
+}
+
+async function dbAdd(rows, label) {
+  for (let i = 0; i < rows.length; i += 5000) {
+    const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
+    rows.slice(i, i + 5000).forEach(r => s.add(r));
+    await txDone(t);
+    if (label && rows.length > 5000) {
+      busy(label + ' ' + fn(Math.min(i + 5000, rows.length)) + ' / ' + fn(rows.length));
+      await tick();
+    }
+  }
+}
+
+async function dbPut(rows) {
+  for (let i = 0; i < rows.length; i += 5000) {
+    const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
+    rows.slice(i, i + 5000).forEach(r => s.put(r));
+    await txDone(t);
+  }
+}
+
+async function dbDelSeason(key) {
+  const t = db.transaction('rows', 'readwrite'), s = t.objectStore('rows');
+  const ks = await rq(s.index('sb').getAllKeys(key));
+  ks.forEach(k => s.delete(k));
+  await txDone(t);
+}
+
+const dbSeason = key => rq(db.transaction('rows').objectStore('rows').index('sb').getAll(key));
+
+async function saveMeta() {
+  const t = db.transaction('meta', 'readwrite');
+  t.objectStore('meta').put(S.seasons, 'seasons');
+  await txDone(t);
+}
+
+async function refreshCounts() {
+  for (const b in S.seasons) {
+    for (const s of S.seasons[b]) {
+      S.counts[b + '|' + s] = await rq(db.transaction('rows').objectStore('rows').index('sb').count(b + '|' + s));
+    }
+  }
+}
+
+async function reload() {
+  S.rows = S.season ? await dbSeason(sbKey()) : [];
+  await refreshCounts();
+  render();
+}
+
+/* ============ LECTURA DE EXCEL ============ */
+async function parseExcelFile(file) {
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+  const sheet = wb.SheetNames[0];
+  const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: '', raw: true });
+  if (!raw.length) throw new Error('El archivo no contiene filas legibles.');
+
+  const fileHeaders = Object.keys(raw[0]);
+  const headerMap = {};
+  MASTER_COLS.forEach(mCol => {
+    const nCol = norm(mCol);
+    const found = fileHeaders.find(h => norm(h) === nCol);
+    if (found) headerMap[mCol] = found;
+  });
+
+  if (!headerMap['Código'] || !headerMap['Cantidad']) {
+    throw new Error('El archivo debe incluir obligatoriamente las columnas "Código" y "Cantidad".');
+  }
+
+  const rows = [];
+  for (const o of raw) {
+    const r = {};
+    MASTER_COLS.forEach(col => {
+      const val = headerMap[col] ? o[headerMap[col]] : '';
+      if (NUM_COLS.includes(col)) {
+        r[col] = Number(String(val || 0).replace(',', '.')) || 0;
+      } else if (col.includes('Fecha')) {
+        r[col] = fdate(val);
+      } else {
+        r[col] = val == null ? '' : String(val).trim();
+      }
+    });
+
+    if (!r['Etapa']) r['Etapa'] = E10;
+
+    r.sb = sbKey();
+    r.brand = S.brand;
+    r.season = S.season;
+    if (r['Código'] && r['Cantidad'] > 0) rows.push(r);
+  }
+  return rows;
+}
+
+/* ============ 1. CARGA COMPRA INICIAL ============ */
+async function loadBuyInitial(file) {
+  try {
+    busy('Leyendo compra inicial…');
+    await tick();
+    const rows = await parseExcelFile(file);
+
+    busy();
+    if (S.rows.length) {
+      const c = await modal(
+        'Confirmar sobrescritura de temporada',
+        `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b>.<br><br>
+        Al cargar como <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> de este archivo.<br><br>
+        <span class="text-xs text-slate-500">Si deseas sumar pedidos adicionales sin borrar nada, usa el botón "Cargar compra extra".</span>`,
+        [['Cancelar', 'c'], ['Sí, cargar como compra inicial', 'ok', 'danger']]
+      );
+      if (c !== 'ok') return;
+    }
+
+    busy('Guardando compra inicial…');
+    await tick();
+    await dbDelSeason(sbKey());
+    await dbAdd(rows, 'Guardando');
+    await reload();
+    busy();
+    modal('Compra Inicial Cargada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
+  } catch(e) {
+    busy();
+    modal('Error al cargar compra inicial', esc(e.message || e));
+  }
+}
+
+/* ============ 2. CARGA COMPRA EXTRA ============ */
+async function loadBuyExtra(file) {
+  try {
+    busy('Leyendo compra extra…');
+    await tick();
+    const rows = await parseExcelFile(file);
+
+    rows.forEach(r => {
+      r['Etapa'] = E10;
+      r['Factura'] = '';
+      r['Fecha de factura'] = '';
+      r['EMBARQUE'] = '';
+    });
+
+    busy();
+    const c = await modal(
+      'Anexar compra extra',
+      `Se sumarán <b>${fn(rows.length)} filas nuevas</b> a <b>${S.brand} ${S.season}</b>.<br><br>
+      Tus filas previas (incluidas las que ya tienen P24 y DROPs) permanecerán intactas.`,
+      [['Cancelar', 'c'], ['Anexar compra', 'ok', 1]]
+    );
+    if (c !== 'ok') return;
+
+    busy('Anexando filas a la base…');
+    await tick();
+    await dbAdd(rows, 'Guardando');
+    await reload();
+    busy();
+    modal('Compra Extra Anexada', `Se añadieron ${fn(rows.length)} filas en estado 10A a la temporada.`);
+  } catch(e) {
+    busy();
+    modal('Error al anexar compra extra', esc(e.message || e));
+  }
+}
+
+/* ============ 3. BORRAR COMPRA TOTAL ============ */
+async function clearSeasonData() {
+  if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada.');
+
+  const c1 = await modal(
+    '¿Borrar toda la compra de la temporada?',
+    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b>.<br><br>
+    Esta acción reinicia la temporada a 0 filas y no se puede deshacer.`,
+    [['Cancelar', 'c'], ['Continuar con el borrado', 'next', 'danger']]
+  );
+  if (c1 !== 'next') return;
+
+  const c2 = await modal(
+    'Confirmación de seguridad requerida',
+    `Por favor confirma una vez más que deseas vaciar por completo la temporada <b>${S.brand} ${S.season}</b>.`,
+    [['Cancelar', 'c'], ['Confirmar y borrar todo', 'yes', 'danger']]
+  );
+  if (c2 !== 'yes') return;
+
+  busy('Borrando registros de la temporada…');
+  await tick();
+  await dbDelSeason(sbKey());
+  await reload();
+  busy();
+  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
+}
+
+/* ============ 4. CRUCE DE OC TRABAJADA ============ */
+async function loadOc(file) {
+  try {
+    busy('Leyendo archivo de OC…');
+    await tick();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+    const targetSheet = wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0];
+    const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
+
+    if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC.');
+
+    const exactIndex = new Map();
+    const skuTallaIndex = new Map();
+
+    S.rows.forEach(r => {
+      if (st(r) === 'o') {
+        const cod = norm(r['Código']);
+        const col = norm(r['Color']);
+        const tal = normTalla(r['Talla']);
+
+        const kExact = `${cod}|${col}|${tal}`;
+        const kSkuTal = `${cod}|${tal}`;
+
+        if (!exactIndex.has(kExact)) exactIndex.set(kExact, []);
+        exactIndex.get(kExact).push(r);
+
+        if (!skuTallaIndex.has(kSkuTal)) skuTallaIndex.set(kSkuTal, []);
+        skuTallaIndex.get(kSkuTal).push(r);
+      }
+    });
+
+    const changed = new Set();
+    const added = [];
+    let matchedUnits = 0;
+    let matchedLines = 0;
+    const unmatched = [];
+
+    for (const o of raw) {
+      const cod = norm(o['Código'] || o['Codigo'] || o['SAP']);
+      const col = norm(o['Color']);
+      const tal = normTalla(o['Talla']);
+      const qty = Number(String(o['Cantidad'] || o['QTY'] || 0).replace(',', '.')) || 0;
+      const fact = String(o['Factura'] || o['No FACTURA '] || '').trim();
+      const refFinal = String(o['Referencia compra'] || o['CANAL'] || '').trim();
+      const embFinal = String(o['EMBARQUE'] || o['Embarque'] || o['Nº de embarque'] || o['EMBARQUES'] || '').trim();
+
+      if (!cod || qty <= 0) continue;
+
+      let pool = exactIndex.get(`${cod}|${col}|${tal}`);
+      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+        pool = skuTallaIndex.get(`${cod}|${tal}`);
+      }
+
+      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+        unmatched.push({ cod: o['Código'], col: o['Color'], tal: o['Talla'], qty });
+        continue;
+      }
+
+      let rem = qty;
+      for (let i = 0; i < pool.length && rem > 0; i++) {
+        const baseRow = pool[i];
+        if (baseRow['Cantidad'] <= 0 || baseRow['Etapa'].startsWith('P24')) continue;
+
+        if (baseRow['Cantidad'] <= rem) {
+          rem -= baseRow['Cantidad'];
+          matchedUnits += baseRow['Cantidad'];
+          baseRow['Etapa'] = EP;
+          if (fact) baseRow['Factura'] = fact;
+          if (refFinal) baseRow['Referencia compra'] = refFinal;
+          if (o['Color']) baseRow['Color'] = o['Color'];
+          if (embFinal) baseRow['EMBARQUE'] = embFinal;
+          if (o['Fecha de factura']) baseRow['Fecha de factura'] = fdate(o['Fecha de factura']);
+          changed.add(baseRow);
+        } else {
+          const facturada = { ...baseRow };
+          delete facturada.id;
+          facturada['Cantidad'] = rem;
+          facturada['Etapa'] = EP;
+          if (fact) facturada['Factura'] = fact;
+          if (refFinal) facturada['Referencia compra'] = refFinal;
+          if (o['Color']) facturada['Color'] = o['Color'];
+          if (embFinal) facturada['EMBARQUE'] = embFinal;
+          if (o['Fecha de factura']) facturada['Fecha de factura'] = fdate(o['Fecha de factura']);
+
+          baseRow['Cantidad'] -= rem;
+          matchedUnits += rem;
+          rem = 0;
+
+          changed.add(baseRow);
+          added.push(facturada);
+        }
+      }
+      matchedLines++;
+    }
+
+    busy();
+    const ch = await modal(
+      'Confirmar cruce de OC',
+      `<p>Se cruzaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasarán a P24 con su información de Embarque.</p>
+      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo en la compra inicial.</p>` : ''}`,
+      [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
+    );
+
+    if (ch !== 'ok') return;
+
+    busy('Actualizando base de datos…');
+    await tick();
+    await dbPut([...changed]);
+    if (added.length) await dbAdd(added);
+    await reload();
+    busy();
+    modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b>.`);
+  } catch(e) {
+    busy();
+    modal('Error en el cruce de OC', esc(e.message || e));
+  }
+}
+
+/* ============ 5. EXPORTACIÓN EXCEL COMPLETA ============ */
+function exportFullExcel() {
+  if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
+  busy('Generando archivo Excel con las 37 columnas maestras…');
+  setTimeout(() => {
+    const aoa = [MASTER_COLS];
+    S.rows.forEach(r => {
+      aoa.push(MASTER_COLS.map(c => r[c] ?? ''));
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
+    XLSX.writeFile(wb, `SITUACION_SEGUMIENTOS_${S.brand}_${S.season}.xlsx`);
+    busy();
+  }, 50);
+}
+
+function exportDrops() {
+  const d = S.rows.filter(r => st(r) === 'd');
+  if (!d.length) return modal('Sin DROPS', 'No hay cancelaciones (DROP) en esta temporada.');
+  const aoa = [
+    ['Código', 'Descripción', 'Color', 'Talla', 'Referencia / Canal', 'EMBARQUE', 'Cantidad', 'FOB Unitario', 'FOB Pérdida'],
+    ...d.map(r => [r['Código'], r['Descripción'], r['Color'], r['Talla'], r['Referencia compra'], r['EMBARQUE'], r['Cantidad'], r['FOB'], r['Cantidad'] * r['FOB']])
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'DROPS');
+  XLSX.writeFile(wb, `DROPS_${S.brand}_${S.season}.xlsx`);
+}
+
+/* ============ INTERFAZ Y VISTAS ============ */
+function render() {
+  renderSide();
+  renderMain();
+  icons();
+}
+
+function renderSide() {
+  $('side').innerHTML = Object.keys(S.seasons).map(b => `
+    <div class="mb-2">
+      <div class="px-5 pt-3 pb-1 text-sm font-semibold text-white">${b}</div>
+      ${S.seasons[b].map(s => {
+        const on = S.brand === b && S.season === s;
+        return `<div class="group flex items-center mx-2 rounded ${on ? 'bg-white/15 text-white' : 'hover:bg-white/5'}">
+          <button class="flex-1 flex justify-between items-center px-3 py-1.5 text-sm" onclick="pick('${b}','${s}')">
+            <span><i data-lucide="folder" class="inline w-4 h-4 mr-1.5 -mt-0.5"></i>${esc(s)}</span>
+            <span class="text-xs num text-slate-400">${fn(S.counts[b + '|' + s])}</span>
+          </button>
+        </div>`;
+      }).join('')}
+      <button class="mx-2 mt-1 px-3 py-1.5 text-sm text-slate-400 hover:text-white" onclick="newSeason('${b}')">
+        <i data-lucide="plus" class="inline w-4 h-4 -mt-0.5"></i> Nueva Temporada
+      </button>
+    </div>
+  `).join('');
+}
+
+async function pick(b, s) {
+  S.brand = b; S.season = s;
+  S.page = 1;
+  busy('Cargando…');
+  await tick();
+  await reload();
+  busy();
+}
+
+async function newSeason(b) {
+  const c = await modal('Nueva Temporada en ' + b, '<input id="ns" class="border rounded w-full px-3 py-2" placeholder="Ej. SS27" autofocus>', [['Cancelar', 'n'], ['Crear', 'y', 1]]);
+  if (c !== 'y') return;
+  const n = $('ns').value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+  if (!n || S.seasons[b].includes(n)) return;
+  S.seasons[b].push(n);
+  await saveMeta();
+  await pick(b, n);
+}
+
+function renderMain() {
+  const m = $('main');
+  if (!S.season) {
+    m.innerHTML = `<div class="m-auto text-center max-w-sm px-6">
+      <i data-lucide="package-search" class="w-10 h-10 mx-auto text-slate-400"></i>
+      <h1 class="text-xl font-semibold mt-3">Selecciona una temporada</h1>
+    </div>`;
+    return;
+  }
+
+  const tabs = [
+    ['dash', 'Resumen', 'layout-dashboard'],
+    ['mx', 'Matriz de seguimiento', 'table'],
+    ['drop', 'Reporte de DROPS', 'ban'],
+    ['canal', 'Resumen por canal', 'git-branch']
+  ];
+
+  m.innerHTML = `
+    <header class="bg-white border-b px-6 pt-4">
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
+        <div>
+          <h1 class="text-xl font-semibold">${S.brand} ${esc(S.season)}</h1>
+          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
+          <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
+          <button class="btn btn-p" onclick="$('fOc').click()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
+          <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="exportFullExcel()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
+          <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar compra total</button>
+        </div>
+      </div>
+      <div class="flex gap-1 overflow-x-auto">
+        ${tabs.map(t => `<button class="tab whitespace-nowrap ${S.tab === t[0] ? 'on' : ''}" onclick="S.tab='${t[0]}';S.page=1;render()"><i data-lucide="${t[2]}" class="inline w-4 h-4 mr-1 -mt-0.5"></i>${t[1]}</button>`).join('')}
+      </div>
+    </header>
+    <section class="flex-1 min-h-0 overflow-y-auto p-6" id="view"></section>
+  `;
+
+  ({ dash: vDash, mx: vMx, drop: vDrop, canal: vCanal })[S.tab]();
+}
+
+function kpi(l, v, sub, c) {
+  return `<div class="bg-white rounded-lg border p-4 ${c || ''}">
+    <div class="text-xs text-slate-500">${l}</div>
+    <div class="text-2xl font-semibold num !text-left mt-1">${v}</div>
+    <div class="text-sm text-slate-600 num !text-left">${sub}</div>
+  </div>`;
+}
+
+function vDash() {
+  let t = 0, p = 0, o = 0, d = 0, tf = 0, pf = 0, of_ = 0, df = 0;
+  for (const r of S.rows) {
+    const q = r['Cantidad'] || 0;
+    const v = q * (r['FOB'] || 0);
+    const k = st(r);
+    t += q; tf += v;
+    if (k === 'p') { p += q; pf += v; }
+    else if (k === 'd') { d += q; df += v; }
+    else { o += q; of_ += v; }
+  }
+  const fr = t ? (p / t * 100).toFixed(1) : '0.0';
+
+  $('view').innerHTML = `
+    <div class="grid gap-3 grid-cols-2 xl:grid-cols-5">
+      ${kpi('Unidades compradas', fn(t), usd(tf) + ' FOB')}
+      ${kpi('Facturado / P24', fn(p), usd(pf) + ' FOB', 'border-l-4 border-l-green-600')}
+      ${kpi('Saldo pendiente (10A)', fn(o), usd(of_) + ' FOB', 'border-l-4 border-l-amber-500')}
+      ${kpi('Unidades en DROP', fn(d), usd(df) + ' FOB', 'border-l-4 border-l-red-600')}
+      ${kpi('Fill Rate', fr + '%', 'facturado ÷ comprado')}
+    </div>
+    <div class="bg-white rounded-lg border p-5 mt-5">
+      <div class="text-sm font-medium mb-2">Distribución de unidades por etapa</div>
+      <div class="flex h-5 rounded overflow-hidden bg-slate-200">
+        <div style="width:${t ? p / t * 100 : 0}%;background:#2f9e5b"></div>
+        <div style="width:${t ? o / t * 100 : 0}%;background:#e9b13a"></div>
+        <div style="width:${t ? d / t * 100 : 0}%;background:#c44848"></div>
+      </div>
+      <div class="flex gap-5 text-xs text-slate-600 mt-2">
+        <span><b>P24:</b> ${fn(p)}</span>
+        <span><b>10A:</b> ${fn(o)}</span>
+        <span><b>DROP:</b> ${fn(d)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function vMx() {
+  const canales = [...new Set(S.rows.map(r => r['Referencia compra']).filter(Boolean))].sort();
+  $('view').innerHTML = `
+    <div class="flex flex-wrap gap-2 mb-3">
+      <input id="q" class="border rounded px-3 py-2 text-sm w-64" placeholder="Buscar Código, Embarque, Factura..." value="${esc(S.f.q)}">
+      <select id="fe" class="border rounded px-2 text-sm">
+        <option value="">Todas las etapas</option>
+        <option value="o">10A · Disponible</option>
+        <option value="p">P24 · Embarque</option>
+        <option value="d">DROP · Cancelado</option>
+      </select>
+      <select id="fc" class="border rounded px-2 text-sm">
+        <option value="">Todos los canales</option>
+        ${canales.map(c => `<option>${esc(c)}</option>`).join('')}
+      </select>
+    </div>
+    <div id="tbl"></div>
+  `;
+  $('fe').value = S.f.etapa;
+  $('fc').value = S.f.canal;
+
+  let t;
+  const go = () => {
+    S.f = { q: $('q').value, etapa: $('fe').value, canal: $('fc').value };
+    S.page = 1;
+    clearTimeout(t);
+    t = setTimeout(drawMx, 200);
+  };
+  ['q', 'fe', 'fc'].forEach(i => $(i).oninput = go);
+  drawMx();
+}
+
+function drawMx() {
+  const f = S.f, q = f.q.toLowerCase();
+  const rows = S.rows.filter(r => 
+    (!f.etapa || st(r) === f.etapa) &&
+    (!f.canal || r['Referencia compra'] === f.canal) &&
+    (!q || (String(r['Código']) + ' ' + String(r['Descripción']) + ' ' + String(r['Factura']) + ' ' + String(r['EMBARQUE'])).toLowerCase().includes(q))
+  );
+
+  const pg = rows.slice((S.page - 1) * S.size, S.page * S.size);
+  $('tbl').innerHTML = `
+    <div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 290px)">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-slate-600">
+            ${['Seg.', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Cant.', 'FOB', 'PVP', 'Factura', 'F. Factura', 'Embarque'].map((h, i) => `<th class="px-3 py-2 whitespace-nowrap ${i >= 7 && i <= 9 ? 'text-right' : ''}">${h}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${pg.map(r => `
+            <tr class="r-${st(r)} border-t border-white/60">
+              <td class="px-3 py-1.5">${esc(r['Seguimiento'])}</td>
+              <td class="px-3 py-1.5 font-medium">${esc(r['Código'])}</td>
+              <td class="px-3 py-1.5 max-w-[16rem] truncate" title="${esc(r['Descripción'])}">${esc(r['Descripción'])}</td>
+              <td class="px-3 py-1.5">${esc(r['Color'])}</td>
+              <td class="px-3 py-1.5">${esc(r['Talla'])}</td>
+              <td class="px-3 py-1.5 whitespace-nowrap">${esc(String(r['Etapa']).split('-')[0])}</td>
+              <td class="px-3 py-1.5">${esc(r['Referencia compra'])}</td>
+              <td class="px-3 py-1.5 num font-semibold">${fn(r['Cantidad'])}</td>
+              <td class="px-3 py-1.5 num">${Number(r['FOB'] || 0).toFixed(2)}</td>
+              <td class="px-3 py-1.5 num">${Number(r['PVP'] || 0).toFixed(2)}</td>
+              <td class="px-3 py-1.5 font-medium">${esc(r['Factura'])}</td>
+              <td class="px-3 py-1.5 whitespace-nowrap">${esc(r['Fecha de factura'])}</td>
+              <td class="px-3 py-1.5 font-semibold text-slate-700 whitespace-nowrap">${esc(r['EMBARQUE'] || '')}</td>
+            </tr>
+          `).join('') || '<tr><td colspan="13" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    ${pager(rows.length)}
+  `;
+}
+
+function pager(n) {
+  const pages = Math.max(1, Math.ceil(n / S.size));
+  S.page = Math.min(S.page, pages);
+  return `
+    <div class="flex items-center gap-2 text-sm mt-3">
+      <span class="text-slate-600">${fn(n)} filas</span>
+      <span class="ml-auto"></span>
+      <select class="border rounded px-2 py-1" onchange="S.size=+this.value;S.page=1;drawMx()">
+        ${[50, 100, 200].map(x => `<option ${x === S.size ? 'selected' : ''}>${x}</option>`).join('')}
+      </select>
+      <button class="btn" ${S.page < 2 ? 'disabled' : ''} onclick="S.page--;drawMx()">Anterior</button>
+      <span>${S.page} / ${pages}</span>
+      <button class="btn" ${S.page >= pages ? 'disabled' : ''} onclick="S.page++;drawMx()">Siguiente</button>
+    </div>
+  `;
+}
+
+function vDrop() {
+  const d = S.rows.filter(r => st(r) === 'd');
+  const u = d.reduce((a, r) => a + (r['Cantidad'] || 0), 0);
+  const f = d.reduce((a, r) => a + (r['Cantidad'] || 0) * (r['FOB'] || 0), 0);
+  $('view').innerHTML = `
+    <div class="grid grid-cols-2 gap-3 max-w-xl">
+      ${kpi('Unidades perdidas (DROP)', fn(u), '', 'border-l-4 border-l-red-600')}
+      ${kpi('FOB cancelado', usd(f), '', 'border-l-4 border-l-red-600')}
+    </div>
+    <div class="flex justify-end my-3">
+      <button class="btn" onclick="exportDrops()"><i data-lucide="file-spreadsheet" class="w-4 h-4"></i>Exportar reporte de DROPS</button>
+    </div>
+    <div class="bg-white border rounded-lg overflow-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-slate-600">
+            ${['Código', 'Descripción', 'Color', 'Talla', 'Canal / Ref.', 'Embarque', 'Cantidad', 'FOB unit.', 'Total FOB pérdida'].map((h, i) => `<th class="px-3 py-2 ${i >= 6 ? 'text-right' : ''}">${h}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${d.map(r => `
+            <tr class="border-t">
+              <td class="px-3 py-1.5 font-medium">${esc(r['Código'])}</td>
+              <td class="px-3 py-1.5">${esc(r['Descripción'])}</td>
+              <td class="px-3 py-1.5">${esc(r['Color'])}</td>
+              <td class="px-3 py-1.5">${esc(r['Talla'])}</td>
+              <td class="px-3 py-1.5">${esc(r['Referencia compra'])}</td>
+              <td class="px-3 py-1.5">${esc(r['EMBARQUE'] || '')}</td>
+              <td class="px-3 py-1.5 num">${fn(r['Cantidad'])}</td>
+              <td class="px-3 py-1.5 num">${Number(r['FOB'] || 0).toFixed(2)}</td>
+              <td class="px-3 py-1.5 num">${usd((r['Cantidad'] || 0) * (r['FOB'] || 0))}</td>
+            </tr>
+          `).join('') || '<tr><td colspan="9" class="p-6 text-center text-slate-500">No hay cancelaciones (DROP) en esta temporada.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function vCanal() {
+  const g = {};
+  S.rows.filter(r => st(r) === 'p').forEach(r => {
+    const c = r['Referencia compra'] || 'SIN DESTINO';
+    if (!g[c]) g[c] = { q: 0, f: 0, l: 0 };
+    g[c].q += r['Cantidad'] || 0;
+    g[c].f += (r['Cantidad'] || 0) * (r['FOB'] || 0);
+    g[c].l++;
+  });
+  const L = Object.entries(g).sort((a, b) => b[1].q - a[1].q);
+  const tot = L.reduce((a, e) => a + e[1].q, 0);
+
+  $('view').innerHTML = `
+    <div class="bg-white border rounded-lg overflow-auto max-w-3xl">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-slate-600">
+            <th class="px-3 py-2">Canal / Referencia final</th>
+            <th class="px-3 py-2 text-right">Unidades P24</th>
+            <th class="px-3 py-2 text-right">% del total</th>
+            <th class="px-3 py-2 text-right">FOB</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${L.map(([c, x]) => `
+            <tr class="border-t">
+              <td class="px-3 py-2 font-medium">${esc(c)}</td>
+              <td class="px-3 py-2 num font-semibold">${fn(x.q)}</td>
+              <td class="px-3 py-2 num">${tot ? (x.q / tot * 100).toFixed(1) : 0}%</td>
+              <td class="px-3 py-2 num">${usd(x.f)}</td>
+            </tr>
+          `).join('') || '<tr><td colspan="4" class="p-6 text-center text-slate-500">No hay unidades en P24 aún.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/* ============ INICIALIZACIÓN ============ */
+['fBuyInit', 'fBuyExtra', 'fOc'].forEach((id, i) => $(id).onchange = e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) [loadBuyInitial, loadBuyExtra, loadOc][i](f);
+});
+
+(async () => {
+  try {
+    db = await openDB();
+    const m = await rq(db.transaction('meta').objectStore('meta').get('seasons'));
+    if (m) S.seasons = m;
+    await refreshCounts();
+    render();
+  } catch(e) {
+    document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB: ' + esc(e.message) + '</p>';
+  }
+})();
+</script>
+</body>
+</html>
