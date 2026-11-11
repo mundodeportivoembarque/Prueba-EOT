@@ -46,8 +46,10 @@
 
 <input type="file" id="fBuyInit" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fBuyExtra" accept=".xlsx,.xls,.csv" class="hidden">
-<input type="file" id="fOc" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fOcPrelim" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fOcFinal" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fJsonImport" accept=".json" class="hidden">
+
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
 <div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
   <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
@@ -138,7 +140,7 @@ const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.o
 
 function openDB() {
   return new Promise((ok, ko) => {
-    const r = indexedDB.open('eot-db-local-v3', 1);
+    const r = indexedDB.open('eot-db-local-v4', 1);
     r.onupgradeneeded = () => {
       const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
       s.createIndex('sb', 'sb');
@@ -231,7 +233,6 @@ async function parseExcelFile(file) {
       }
     });
 
-    // Calcular Canal Inicial si viene en blanco o recién cargado
     if (!r['Canal Inicial']) {
       r['Canal Inicial'] = resolverCanalInicial(r['Referencia compra'], S.brand);
     }
@@ -339,16 +340,49 @@ async function clearSeasonData() {
   modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
 }
 
-/* ============ 4. CRUCE DE OC TRABAJADA (CANAL FINAL Y PRECIOS PRODUCTO) ============ */
-async function loadOc(file) {
+/* ============ 4. MODAL SELECTOR DE TIPO DE OC ============ */
+async function promptOcType() {
+  const c = await modal(
+    'Selecciona el tipo de OC a cargar',
+    `<p class="text-slate-600 mb-4">Indica qué archivo vas a procesar para aplicar el tratamiento correcto:</p>
+     <div class="space-y-3">
+       <button id="btnChoosePrelim" class="w-full text-left p-3.5 border rounded-lg hover:border-indigo-600 hover:bg-indigo-50/50 transition">
+         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="clock" class="w-4 h-4 text-indigo-600"></i> 1. OC Preliminar (Descontar de 10A a P24)</div>
+         <div class="text-xs text-slate-500 mt-1">Tu OC de trabajo. Reserva unidades de la compra inicial, pasa a P24 con Factura/Embarque y deja el saldo listo para el siguiente embarque.</div>
+       </button>
+       <button id="btnChooseFinal" class="w-full text-left p-3.5 border rounded-lg hover:border-emerald-600 hover:bg-emerald-50/50 transition">
+         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="check-circle" class="w-4 h-4 text-emerald-600"></i> 2. OC Final de Producto (Actualizar P24)</div>
+         <div class="text-xs text-slate-500 mt-1">Archivo devuelto por Producto. No toca el saldo 10A; inyecta Canales Finales y Precios confirmados directamente sobre las líneas en P24.</div>
+       </button>
+     </div>`,
+    [['Cancelar', 'c']]
+  );
+  icons();
+}
+
+document.addEventListener('click', e => {
+  const bPrelim = e.target.closest('#btnChoosePrelim');
+  const bFinal = e.target.closest('#btnChooseFinal');
+  if (bPrelim) { $('modal').classList.add('hidden'); $('fOcPrelim').click(); }
+  if (bFinal) { $('modal').classList.add('hidden'); $('fOcFinal').click(); }
+});
+
+const getRowVal = (o, keys) => {
+  for (const k of keys) {
+    if (o[k] !== undefined && o[k] !== '') return o[k];
+  }
+  return '';
+};
+
+/* ============ 4A. CRUCE OC PRELIMINAR (DESCUENTA DE 10A A P24) ============ */
+async function loadOcPreliminar(file) {
   try {
-    busy('Leyendo archivo de OC de Producto…');
+    busy('Leyendo OC preliminar…');
     await tick();
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-    // Prioriza Hoja1 si existe, luego OC, luego la primera hoja
-    const targetSheet = wb.Sheets['Hoja1'] ? 'Hoja1' : (wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0]);
+    const targetSheet = wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0];
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
-    if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC.');
+    if (!raw.length) throw new Error('No se encontraron filas en el archivo de OC.');
 
     const exactIndex = new Map();
     const skuTallaIndex = new Map();
@@ -372,31 +406,15 @@ async function loadOc(file) {
     let matchedLines = 0;
     const unmatched = [];
 
-    // Helper para buscar columnas flexibles en la OC de Producto
-    const getVal = (o, keys) => {
-      for (const k of keys) {
-        if (o[k] !== undefined && o[k] !== '') return o[k];
-      }
-      return '';
-    };
-
     for (const o of raw) {
-      const cod = norm(getVal(o, ['Código', 'Codigo', 'SAP']));
-      const col = norm(getVal(o, ['Color']));
-      const tal = normTalla(getVal(o, ['Talla']));
-      const qty = Number(String(getVal(o, ['Cantidad', 'QTY', 'LPN DETAIL SIZE VALUE']) || 0).replace(',', '.')) || 0;
-      
-      const fact = String(getVal(o, ['Factura', 'No FACTURA '])).trim();
-      const embFinal = String(getVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES'])).trim();
-      const fFact = fdate(getVal(o, ['Fecha de factura']));
-
-      // Canales y Precios devueltos por Producto
-      const cFinalRaw = getVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
-      const cFinal = normalizarCanal(cFinalRaw);
-
-      const pvpFin = Number(String(getVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
-      const p4Fin = Number(String(getVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
-      const pmyFin = Number(String(getVal(o, ['PMY.1', 'PMY FINAL', 'PMY Final', 'PMY']) || 0).replace(',', '.')) || 0;
+      const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP']));
+      const col = norm(getRowVal(o, ['Color']));
+      const tal = normTalla(getRowVal(o, ['Talla']));
+      const qty = Number(String(getRowVal(o, ['Cantidad', 'QTY']) || 0).replace(',', '.')) || 0;
+      const fact = String(getRowVal(o, ['Factura', 'No FACTURA '])).trim();
+      const embFinal = String(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES'])).trim();
+      const fFact = fdate(getRowVal(o, ['Fecha de factura']));
+      const refFinal = String(getRowVal(o, ['Referencia compra', 'CANAL'])).trim();
 
       if (!cod || qty <= 0) continue;
 
@@ -413,7 +431,6 @@ async function loadOc(file) {
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
         if (baseRow['Cantidad'] <= 0 || baseRow['Etapa'].startsWith('P24')) continue;
-        
         if (baseRow['Cantidad'] <= rem) {
           rem -= baseRow['Cantidad'];
           matchedUnits += baseRow['Cantidad'];
@@ -421,16 +438,9 @@ async function loadOc(file) {
           if (fact) baseRow['Factura'] = fact;
           if (fFact) baseRow['Fecha de factura'] = fFact;
           if (embFinal) baseRow['EMBARQUE'] = embFinal;
-          if (o['Color']) baseRow['Color'] = o['Color'];
-          
-          if (cFinal) baseRow['Canal Final'] = cFinal;
-          if (pvpFin) baseRow['PVP Final'] = pvpFin;
-          if (p4Fin) baseRow['P4 Final'] = p4Fin;
-          if (pmyFin) baseRow['PMY Final'] = pmyFin;
-          
+          if (refFinal && !baseRow['Referencia compra']) baseRow['Referencia compra'] = refFinal;
           changed.add(baseRow);
         } else {
-          // Split de línea por partición de Producto
           const facturada = { ...baseRow };
           delete facturada.id;
           facturada['Cantidad'] = rem;
@@ -438,12 +448,7 @@ async function loadOc(file) {
           if (fact) facturada['Factura'] = fact;
           if (fFact) facturada['Fecha de factura'] = fFact;
           if (embFinal) facturada['EMBARQUE'] = embFinal;
-          if (o['Color']) facturada['Color'] = o['Color'];
-          
-          if (cFinal) facturada['Canal Final'] = cFinal;
-          if (pvpFin) facturada['PVP Final'] = pvpFin;
-          if (p4Fin) facturada['P4 Final'] = p4Fin;
-          if (pmyFin) facturada['PMY Final'] = pmyFin;
+          if (refFinal && !facturada['Referencia compra']) facturada['Referencia compra'] = refFinal;
 
           baseRow['Cantidad'] -= rem;
           matchedUnits += rem;
@@ -457,23 +462,154 @@ async function loadOc(file) {
 
     busy();
     const ch = await modal(
-      'Confirmar cruce de OC de Producto',
-      `<p>Se cruzaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasarán a P24 con sus <b>Canales Finales y Precios Confirmados</b>.</p>
-      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en la compra inicial.</p>` : ''}`,
+      'Confirmar cruce preliminar',
+      `<p>Se descontaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasan a <b>P24</b>.</p>
+       <p class="text-xs text-slate-500 mt-1">El saldo 10A ha quedado liberado para tus siguientes embarques.</p>
+       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en la compra inicial.</p>` : ''}`,
       [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
     );
     if (ch !== 'ok') return;
 
-    busy('Actualizando base de datos local…');
+    busy('Actualizando base de datos…');
     await tick();
     await dbPut([...changed]);
     if (added.length) await dbAdd(added);
     await reload();
     busy();
-    modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b> con sus canales finales.`);
+    modal('OC Preliminar Cargada', `Se pasaron ${fn(matchedUnits)} unidades a <b>P24</b>.`);
   } catch(e) {
     busy();
-    modal('Error en el cruce de OC', esc(e.message || e));
+    modal('Error en cruce preliminar', esc(e.message || e));
+  }
+}
+
+/* ============ 4B. CRUCE OC FINAL DE PRODUCTO (INYECTA CANALES Y PRECIOS A P24) ============ */
+async function loadOcFinalProducto(file) {
+  try {
+    busy('Leyendo OC final de Producto…');
+    await tick();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+    const targetSheet = wb.Sheets['Hoja1'] ? 'Hoja1' : (wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0]);
+    const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
+    if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC de Producto.');
+
+    // Indexar exclusivamente filas que ya están en P24
+    const p24ExactIndex = new Map();
+    const p24SkuTalIndex = new Map();
+
+    S.rows.forEach(r => {
+      if (st(r) === 'p') {
+        const cod = norm(r['Código']);
+        const col = norm(r['Color']);
+        const tal = normTalla(r['Talla']);
+        const emb = norm(r['EMBARQUE']);
+        const fact = norm(r['Factura']);
+        
+        // Llaves compuestas con Factura/Embarque para asegurar que actualizamos el embarque correcto
+        const kExact = `${cod}|${col}|${tal}|${emb}|${fact}`;
+        const kSkuTal = `${cod}|${tal}|${emb}|${fact}`;
+        const kFallback = `${cod}|${col}|${tal}`;
+
+        if (!p24ExactIndex.has(kExact)) p24ExactIndex.set(kExact, []);
+        p24ExactIndex.get(kExact).push(r);
+
+        if (!p24SkuTalIndex.has(kSkuTal)) p24SkuTalIndex.set(kSkuTal, []);
+        p24SkuTalIndex.get(kSkuTal).push(r);
+
+        if (!p24ExactIndex.has(kFallback)) p24ExactIndex.set(kFallback, []);
+        p24ExactIndex.get(kFallback).push(r);
+      }
+    });
+
+    const changed = new Set();
+    const added = [];
+    let updatedUnits = 0;
+    let updatedLines = 0;
+    const unmatched = [];
+
+    for (const o of raw) {
+      const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP']));
+      const col = norm(getRowVal(o, ['Color']));
+      const tal = normTalla(getRowVal(o, ['Talla']));
+      const qty = Number(String(getRowVal(o, ['Cantidad', 'QTY', 'LPN DETAIL SIZE VALUE']) || 0).replace(',', '.')) || 0;
+      const fact = norm(getRowVal(o, ['Factura', 'No FACTURA ']));
+      const emb = norm(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES']));
+
+      const cFinalRaw = getRowVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
+      const cFinal = normalizarCanal(cFinalRaw);
+
+      const pvpFin = Number(String(getRowVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
+      const p4Fin = Number(String(getRowVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
+      const pmyFin = Number(String(getRowVal(o, ['PMY.1', 'PMY FINAL', 'PMY Final', 'PMY']) || 0).replace(',', '.')) || 0;
+
+      if (!cod || qty <= 0) continue;
+
+      let pool = p24ExactIndex.get(`${cod}|${col}|${tal}|${emb}|${fact}`);
+      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+        pool = p24SkuTalIndex.get(`${cod}|${tal}|${emb}|${fact}`);
+      }
+      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+        pool = p24ExactIndex.get(`${cod}|${col}|${tal}`);
+      }
+
+      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+        unmatched.push({ cod: o['Código'], col: o['Color'], tal: o['Talla'], qty });
+        continue;
+      }
+
+      let rem = qty;
+      for (let i = 0; i < pool.length && rem > 0; i++) {
+        const baseRow = pool[i];
+        if (baseRow['Cantidad'] <= 0) continue;
+
+        if (baseRow['Cantidad'] <= rem) {
+          rem -= baseRow['Cantidad'];
+          updatedUnits += baseRow['Cantidad'];
+          if (cFinal) baseRow['Canal Final'] = cFinal;
+          if (pvpFin) baseRow['PVP Final'] = pvpFin;
+          if (p4Fin) baseRow['P4 Final'] = p4Fin;
+          if (pmyFin) baseRow['PMY Final'] = pmyFin;
+          changed.add(baseRow);
+        } else {
+          // Split dentro de P24 por redistribución de Producto
+          const splitRow = { ...baseRow };
+          delete splitRow.id;
+          splitRow['Cantidad'] = rem;
+          if (cFinal) splitRow['Canal Final'] = cFinal;
+          if (pvpFin) splitRow['PVP Final'] = pvpFin;
+          if (p4Fin) splitRow['P4 Final'] = p4Fin;
+          if (pmyFin) splitRow['PMY Final'] = pmyFin;
+
+          baseRow['Cantidad'] -= rem;
+          updatedUnits += rem;
+          rem = 0;
+          changed.add(baseRow);
+          added.push(splitRow);
+        }
+      }
+      updatedLines++;
+    }
+
+    busy();
+    const ch = await modal(
+      'Confirmar actualización final de Producto',
+      `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con sus <b>Canales Finales y Precios Confirmados</b>.</p>
+       <p class="text-xs text-slate-500 mt-1">Tu compra inicial 10A no se vio alterada.</p>
+       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron registro P24 previo para actualizar.</p>` : ''}`,
+      [['Cancelar', 'c'], ['Actualizar líneas P24', 'ok', 1]]
+    );
+    if (ch !== 'ok') return;
+
+    busy('Guardando actualización en la base local…');
+    await tick();
+    await dbPut([...changed]);
+    if (added.length) await dbAdd(added);
+    await reload();
+    busy();
+    modal('OC Final Aplicada', `Se actualizaron los canales finales y precios para ${fn(updatedUnits)} unidades en <b>P24</b>.`);
+  } catch(e) {
+    busy();
+    modal('Error al aplicar OC final', esc(e.message || e));
   }
 }
 
@@ -484,7 +620,7 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '3.0',
+      version: '4.0',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
@@ -658,7 +794,7 @@ function renderMain() {
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
-          <button class="btn btn-p" onclick="$('fOc').click()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
+          <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="exportFullExcel()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
           <button class="btn !bg-indigo-700 !text-white !border-indigo-700" onclick="exportJsonBackup()"><i data-lucide="file-json" class="w-4 h-4"></i>Exportar JSON</button>
           <button class="btn !bg-indigo-50 !text-indigo-800 !border-indigo-300" onclick="$('fJsonImport').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar JSON</button>
@@ -887,17 +1023,11 @@ function vCanal() {
 }
 
 /* ============ INICIALIZACIÓN ============ */
-['fBuyInit', 'fBuyExtra', 'fOc'].forEach((id, i) => $(id).onchange = e => {
-  const f = e.target.files[0];
-  e.target.value = '';
-  if (f) [loadBuyInitial, loadBuyExtra, loadOc][i](f);
-});
-
-$('fJsonImport').onchange = e => {
-  const f = e.target.files[0];
-  e.target.value = '';
-  if (f) importJsonBackup(f);
-};
+$('fBuyInit').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadBuyInitial(f); };
+$('fBuyExtra').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadBuyExtra(f); };
+$('fOcPrelim').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcPreliminar(f); };
+$('fOcFinal').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcFinalProducto(f); };
+$('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importJsonBackup(f); };
 
 (async () => {
   try {
