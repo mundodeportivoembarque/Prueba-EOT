@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EOT · Elastic Order Tracking (Local & Compartible)</title>
+<title>EOT · Elastic Order Tracking</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
   const _origWarn = console.warn;
@@ -36,7 +36,7 @@
       <div class="font-bold text-white text-lg">EOT</div>
       <div class="text-xs text-slate-400">Elastic Order Tracking</div>
     </div>
-    <div class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Almacenamiento Local en Navegador (IndexedDB)">
+    <div class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Base de Datos Local IndexedDB">
       <span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local
     </div>
   </div>
@@ -54,16 +54,45 @@
 </div>
 
 <script>
-/* ============ LAS 30 COLUMNAS ACTIVAS ============ */
+/* ============ CONFIGURACIÓN DE TIENDAS Y CANALES ============ */
+const TIENDAS_ADIDAS = new Set([
+  'CITY', 'CONDADO', 'CAPUEL-CLUB EMELEC', 'EMELEC-TIENDA', 'CUENCA', 'JARDIN',
+  'QUICENTRO', 'SAN MARINO', 'SCALA', 'SOL', 'VILLAGE', 'PRO2', 'OCS CUENCA',
+  'DORAL', 'SNEAKER COLLECT TIENDA', 'AMBATO', 'SANTO DOMINGO',
+  'ORIGINALS SCALA-CONDAD', 'WC02', 'WEB ADIDAS TIENDAS', 'OC SOL'
+].map(s => s.trim().toUpperCase()));
+
+const TIENDAS_REEBOK = new Set([
+  'CONDADO', 'CUENCA', 'SOL', 'QUICENTRO SUR', 'PRO2'
+].map(s => s.trim().toUpperCase()));
+
+function resolverCanalInicial(refCompra, marca) {
+  const ref = String(refCompra || '').trim().toUpperCase();
+  if (!ref) return '';
+  const isAdi = String(marca || '').toUpperCase().includes('ADI');
+  const pool = isAdi ? TIENDAS_ADIDAS : TIENDAS_REEBOK;
+  if (pool.has(ref)) return 'TIENDAS';
+  return normalizarCanal(ref);
+}
+
+function normalizarCanal(c) {
+  let s = String(c || '').trim().toUpperCase();
+  if (s === 'EXCLUSIVO WEB' || s === 'WEB REEBOK MEDEPORT') return 'WEB';
+  return s;
+}
+
+/* ============ LAS 35 COLUMNAS MAESTRAS ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
-  'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 'Referencia compra',
+  'Seguimiento', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 
+  'Referencia compra', 'Canal Inicial', 'Canal Final',
   'Código', 'Color', 'Talla', 'Talla marca', 'Descripción', 'Género',
-  'Fecha de entrega', 'Fecha de venta', 'Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY',
+  'Fecha de entrega', 'Fecha de venta', 'Cantidad', 'FOB', 
+  'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final',
   'Etapa', 'Documento', 'EMBARQUE', 'Fecha estimada inicio',
   'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura'
 ];
-const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY'];
+const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final'];
 const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
 let db;
 
@@ -103,13 +132,13 @@ function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
   });
 }
 
-/* ============ MOTOR INDEXEDDB DE ALTA VELOCIDAD ============ */
+/* ============ MOTOR INDEXEDDB LOCAL ============ */
 const rq = r => new Promise((ok, ko) => { r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
 const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.onabort = () => ko(t.error); });
 
 function openDB() {
   return new Promise((ok, ko) => {
-    const r = indexedDB.open('eot-db-local-v2', 1);
+    const r = indexedDB.open('eot-db-local-v3', 1);
     r.onupgradeneeded = () => {
       const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
       s.createIndex('sb', 'sb');
@@ -169,7 +198,7 @@ async function reload() {
   render();
 }
 
-/* ============ PARSER DE EXCEL (30 COLUMNAS) ============ */
+/* ============ PARSER DE EXCEL (COMPRA INICIAL) ============ */
 async function parseExcelFile(file) {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
   const sheet = wb.SheetNames[0];
@@ -177,14 +206,17 @@ async function parseExcelFile(file) {
   if (!raw.length) throw new Error('El archivo no contiene filas legibles.');
   const fileHeaders = Object.keys(raw[0]);
   const headerMap = {};
+  
   MASTER_COLS.forEach(mCol => {
     const nCol = norm(mCol);
     const found = fileHeaders.find(h => norm(h) === nCol);
     if (found) headerMap[mCol] = found;
   });
+  
   if (!headerMap['Código'] || !headerMap['Cantidad']) {
     throw new Error('El archivo debe incluir obligatoriamente las columnas "Código" y "Cantidad".');
   }
+  
   const rows = [];
   for (const o of raw) {
     const r = {};
@@ -198,7 +230,17 @@ async function parseExcelFile(file) {
         r[col] = val == null ? '' : String(val).trim();
       }
     });
+
+    // Calcular Canal Inicial si viene en blanco o recién cargado
+    if (!r['Canal Inicial']) {
+      r['Canal Inicial'] = resolverCanalInicial(r['Referencia compra'], S.brand);
+    }
+    if (!r['Canal Final']) r['Canal Final'] = '';
+    if (!r['PVP Final']) r['PVP Final'] = 0;
+    if (!r['P4 Final']) r['P4 Final'] = 0;
+    if (!r['PMY Final']) r['PMY Final'] = 0;
     if (!r['Etapa']) r['Etapa'] = E10;
+
     r.sb = sbKey();
     r.brand = S.brand;
     r.season = S.season;
@@ -248,6 +290,10 @@ async function loadBuyExtra(file) {
       r['Factura'] = '';
       r['Fecha de factura'] = '';
       r['EMBARQUE'] = '';
+      r['Canal Final'] = '';
+      r['PVP Final'] = 0;
+      r['P4 Final'] = 0;
+      r['PMY Final'] = 0;
     });
     busy();
     const c = await modal(
@@ -293,13 +339,14 @@ async function clearSeasonData() {
   modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
 }
 
-/* ============ 4. CRUCE DE OC TRABAJADA (SIN LÍMITE DE TAMAÑO) ============ */
+/* ============ 4. CRUCE DE OC TRABAJADA (CANAL FINAL Y PRECIOS PRODUCTO) ============ */
 async function loadOc(file) {
   try {
-    busy('Leyendo archivo de OC…');
+    busy('Leyendo archivo de OC de Producto…');
     await tick();
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-    const targetSheet = wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0];
+    // Prioriza Hoja1 si existe, luego OC, luego la primera hoja
+    const targetSheet = wb.Sheets['Hoja1'] ? 'Hoja1' : (wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0]);
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
     if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC.');
 
@@ -325,14 +372,32 @@ async function loadOc(file) {
     let matchedLines = 0;
     const unmatched = [];
 
+    // Helper para buscar columnas flexibles en la OC de Producto
+    const getVal = (o, keys) => {
+      for (const k of keys) {
+        if (o[k] !== undefined && o[k] !== '') return o[k];
+      }
+      return '';
+    };
+
     for (const o of raw) {
-      const cod = norm(o['Código'] || o['Codigo'] || o['SAP']);
-      const col = norm(o['Color']);
-      const tal = normTalla(o['Talla']);
-      const qty = Number(String(o['Cantidad'] || o['QTY'] || 0).replace(',', '.')) || 0;
-      const fact = String(o['Factura'] || o['No FACTURA '] || '').trim();
-      const refFinal = String(o['Referencia compra'] || o['CANAL'] || '').trim();
-      const embFinal = String(o['EMBARQUE'] || o['Embarque'] || o['Nº de embarque'] || o['EMBARQUES'] || '').trim();
+      const cod = norm(getVal(o, ['Código', 'Codigo', 'SAP']));
+      const col = norm(getVal(o, ['Color']));
+      const tal = normTalla(getVal(o, ['Talla']));
+      const qty = Number(String(getVal(o, ['Cantidad', 'QTY', 'LPN DETAIL SIZE VALUE']) || 0).replace(',', '.')) || 0;
+      
+      const fact = String(getVal(o, ['Factura', 'No FACTURA '])).trim();
+      const embFinal = String(getVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES'])).trim();
+      const fFact = fdate(getVal(o, ['Fecha de factura']));
+
+      // Canales y Precios devueltos por Producto
+      const cFinalRaw = getVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
+      const cFinal = normalizarCanal(cFinalRaw);
+
+      const pvpFin = Number(String(getVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
+      const p4Fin = Number(String(getVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
+      const pmyFin = Number(String(getVal(o, ['PMY.1', 'PMY FINAL', 'PMY Final', 'PMY']) || 0).replace(',', '.')) || 0;
+
       if (!cod || qty <= 0) continue;
 
       let pool = exactIndex.get(`${cod}|${col}|${tal}`);
@@ -348,26 +413,38 @@ async function loadOc(file) {
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
         if (baseRow['Cantidad'] <= 0 || baseRow['Etapa'].startsWith('P24')) continue;
+        
         if (baseRow['Cantidad'] <= rem) {
           rem -= baseRow['Cantidad'];
           matchedUnits += baseRow['Cantidad'];
           baseRow['Etapa'] = EP;
           if (fact) baseRow['Factura'] = fact;
-          if (refFinal) baseRow['Referencia compra'] = refFinal;
-          if (o['Color']) baseRow['Color'] = o['Color'];
+          if (fFact) baseRow['Fecha de factura'] = fFact;
           if (embFinal) baseRow['EMBARQUE'] = embFinal;
-          if (o['Fecha de factura']) baseRow['Fecha de factura'] = fdate(o['Fecha de factura']);
+          if (o['Color']) baseRow['Color'] = o['Color'];
+          
+          if (cFinal) baseRow['Canal Final'] = cFinal;
+          if (pvpFin) baseRow['PVP Final'] = pvpFin;
+          if (p4Fin) baseRow['P4 Final'] = p4Fin;
+          if (pmyFin) baseRow['PMY Final'] = pmyFin;
+          
           changed.add(baseRow);
         } else {
+          // Split de línea por partición de Producto
           const facturada = { ...baseRow };
           delete facturada.id;
           facturada['Cantidad'] = rem;
           facturada['Etapa'] = EP;
           if (fact) facturada['Factura'] = fact;
-          if (refFinal) facturada['Referencia compra'] = refFinal;
-          if (o['Color']) facturada['Color'] = o['Color'];
+          if (fFact) facturada['Fecha de factura'] = fFact;
           if (embFinal) facturada['EMBARQUE'] = embFinal;
-          if (o['Fecha de factura']) facturada['Fecha de factura'] = fdate(o['Fecha de factura']);
+          if (o['Color']) facturada['Color'] = o['Color'];
+          
+          if (cFinal) facturada['Canal Final'] = cFinal;
+          if (pvpFin) facturada['PVP Final'] = pvpFin;
+          if (p4Fin) facturada['P4 Final'] = p4Fin;
+          if (pmyFin) facturada['PMY Final'] = pmyFin;
+
           baseRow['Cantidad'] -= rem;
           matchedUnits += rem;
           rem = 0;
@@ -380,9 +457,9 @@ async function loadOc(file) {
 
     busy();
     const ch = await modal(
-      'Confirmar cruce de OC',
-      `<p>Se cruzaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasarán a P24 con su información de Embarque.</p>
-      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo en la compra inicial.</p>` : ''}`,
+      'Confirmar cruce de OC de Producto',
+      `<p>Se cruzaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasarán a P24 con sus <b>Canales Finales y Precios Confirmados</b>.</p>
+      ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en la compra inicial.</p>` : ''}`,
       [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
     );
     if (ch !== 'ok') return;
@@ -393,7 +470,7 @@ async function loadOc(file) {
     if (added.length) await dbAdd(added);
     await reload();
     busy();
-    modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b>.`);
+    modal('Cruce completado', `Se actualizaron ${fn(matchedUnits)} unidades a estado <b>P24</b> con sus canales finales.`);
   } catch(e) {
     busy();
     modal('Error en el cruce de OC', esc(e.message || e));
@@ -407,14 +484,14 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '2.0',
+      version: '3.0',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
       rowCount: S.rows.length,
       rows: S.rows.map(r => {
         const o = { ...r };
-        delete o.id; // Clave auto-incremental regenerada al importar
+        delete o.id;
         return o;
       })
     };
@@ -455,7 +532,6 @@ async function importJsonBackup(file) {
     );
     if (c !== 'ok') return;
 
-    // Asegurar temporada en el selector si no existe
     if (!S.seasons[b]) S.seasons[b] = [];
     if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
     await saveMeta();
@@ -468,7 +544,6 @@ async function importJsonBackup(file) {
     await tick();
     await dbDelSeason(targetKey);
     
-    // Normalizar filas asegurando sbKey
     const cleanRows = data.rows.map(r => ({ ...r, sb: targetKey, brand: b, season: s }));
     await dbAdd(cleanRows, 'Importando');
     await reload();
@@ -480,10 +555,10 @@ async function importJsonBackup(file) {
   }
 }
 
-/* ============ 6. EXPORTACIONES EXCEL (30 COLUMNAS) ============ */
+/* ============ 6. EXPORTACIONES EXCEL (35 COLUMNAS) ============ */
 function exportFullExcel() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
-  busy('Generando archivo Excel con las 30 columnas maestras…');
+  busy('Generando archivo Excel con las 35 columnas maestras…');
   setTimeout(() => {
     const aoa = [MASTER_COLS];
     S.rows.forEach(r => {
@@ -500,8 +575,12 @@ function exportDrops() {
   const d = S.rows.filter(r => st(r) === 'd');
   if (!d.length) return modal('Sin DROPS', 'No hay cancelaciones (DROP) en esta temporada.');
   const aoa = [
-    ['Código', 'Descripción', 'Color', 'Talla', 'Referencia / Canal', 'EMBARQUE', 'Cantidad', 'FOB Unitario', 'FOB Pérdida'],
-    ...d.map(r => [r['Código'], r['Descripción'], r['Color'], r['Talla'], r['Referencia compra'], r['EMBARQUE'], r['Cantidad'], r['FOB'], r['Cantidad'] * r['FOB']])
+    ['Código', 'Descripción', 'Color', 'Talla', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'EMBARQUE', 'Cantidad', 'FOB Unitario', 'FOB Pérdida'],
+    ...d.map(r => [
+      r['Código'], r['Descripción'], r['Color'], r['Talla'], 
+      r['Referencia compra'], r['Canal Inicial'], r['Canal Final'], 
+      r['EMBARQUE'], r['Cantidad'], r['FOB'], r['Cantidad'] * r['FOB']
+    ])
   ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'DROPS');
@@ -640,7 +719,7 @@ function vDash() {
 }
 
 function vMx() {
-  const canales = [...new Set(S.rows.map(r => r['Referencia compra']).filter(Boolean))].sort();
+  const canales = [...new Set(S.rows.map(r => r['Canal Final'] || r['Canal Inicial'] || r['Referencia compra']).filter(Boolean))].sort();
   $('view').innerHTML = `
     <div class="flex flex-wrap gap-2 mb-3">
       <input id="q" class="border rounded px-3 py-2 text-sm w-64" placeholder="Buscar Código, Embarque, Factura..." value="${esc(S.f.q)}">
@@ -674,7 +753,7 @@ function drawMx() {
   const f = S.f, q = f.q.toLowerCase();
   const rows = S.rows.filter(r => 
     (!f.etapa || st(r) === f.etapa) &&
-    (!f.canal || r['Referencia compra'] === f.canal) &&
+    (!f.canal || r['Canal Final'] === f.canal || r['Canal Inicial'] === f.canal || r['Referencia compra'] === f.canal) &&
     (!q || (String(r['Código']) + ' ' + String(r['Descripción']) + ' ' + String(r['Factura']) + ' ' + String(r['EMBARQUE'])).toLowerCase().includes(q))
   );
   const pg = rows.slice((S.page - 1) * S.size, S.page * S.size);
@@ -683,7 +762,7 @@ function drawMx() {
       <table class="w-full text-sm">
         <thead>
           <tr class="text-left text-xs text-slate-600">
-            ${['Seg.', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Cant.', 'FOB', 'PVP', 'Factura', 'F. Factura', 'Embarque'].map((h, i) => `<th class="px-3 py-2 whitespace-nowrap ${i >= 7 && i <= 9 ? 'text-right' : ''}">${h}</th>`).join('')}
+            ${['Seg.', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'Cant.', 'FOB', 'PVP', 'PVP Final', 'Factura', 'Embarque'].map((h, i) => `<th class="px-3 py-2 whitespace-nowrap ${i >= 9 && i <= 12 ? 'text-right' : ''}">${h}</th>`).join('')}
           </tr>
         </thead>
         <tbody>
@@ -691,19 +770,21 @@ function drawMx() {
             <tr class="r-${st(r)} border-t border-white/60">
               <td class="px-3 py-1.5">${esc(r['Seguimiento'])}</td>
               <td class="px-3 py-1.5 font-medium">${esc(r['Código'])}</td>
-              <td class="px-3 py-1.5 max-w-[16rem] truncate" title="${esc(r['Descripción'])}">${esc(r['Descripción'])}</td>
+              <td class="px-3 py-1.5 max-w-[14rem] truncate" title="${esc(r['Descripción'])}">${esc(r['Descripción'])}</td>
               <td class="px-3 py-1.5">${esc(r['Color'])}</td>
               <td class="px-3 py-1.5">${esc(r['Talla'])}</td>
               <td class="px-3 py-1.5 whitespace-nowrap">${esc(String(r['Etapa']).split('-')[0])}</td>
-              <td class="px-3 py-1.5">${esc(r['Referencia compra'])}</td>
+              <td class="px-3 py-1.5 text-xs text-slate-500">${esc(r['Referencia compra'])}</td>
+              <td class="px-3 py-1.5 font-medium">${esc(r['Canal Inicial'] || '')}</td>
+              <td class="px-3 py-1.5 font-semibold text-indigo-900">${esc(r['Canal Final'] || '')}</td>
               <td class="px-3 py-1.5 num font-semibold">${fn(r['Cantidad'])}</td>
               <td class="px-3 py-1.5 num">${Number(r['FOB'] || 0).toFixed(2)}</td>
               <td class="px-3 py-1.5 num">${Number(r['PVP'] || 0).toFixed(2)}</td>
+              <td class="px-3 py-1.5 num font-semibold text-emerald-800">${Number(r['PVP Final'] || 0) ? Number(r['PVP Final']).toFixed(2) : '-'}</td>
               <td class="px-3 py-1.5 font-medium">${esc(r['Factura'])}</td>
-              <td class="px-3 py-1.5 whitespace-nowrap">${esc(r['Fecha de factura'])}</td>
               <td class="px-3 py-1.5 font-semibold text-slate-700 whitespace-nowrap">${esc(r['EMBARQUE'] || '')}</td>
             </tr>
-          `).join('') || '<tr><td colspan="13" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
+          `).join('') || '<tr><td colspan="15" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -744,7 +825,7 @@ function vDrop() {
       <table class="w-full text-sm">
         <thead>
           <tr class="text-left text-xs text-slate-600">
-            ${['Código', 'Descripción', 'Color', 'Talla', 'Canal / Ref.', 'Embarque', 'Cantidad', 'FOB unit.', 'Total FOB pérdida'].map((h, i) => `<th class="px-3 py-2 ${i >= 6 ? 'text-right' : ''}">${h}</th>`).join('')}
+            ${['Código', 'Descripción', 'Color', 'Talla', 'Ref. Compra', 'Canal Inicial', 'Embarque', 'Cantidad', 'FOB unit.', 'Total FOB pérdida'].map((h, i) => `<th class="px-3 py-2 ${i >= 7 ? 'text-right' : ''}">${h}</th>`).join('')}
           </tr>
         </thead>
         <tbody>
@@ -755,12 +836,13 @@ function vDrop() {
               <td class="px-3 py-1.5">${esc(r['Color'])}</td>
               <td class="px-3 py-1.5">${esc(r['Talla'])}</td>
               <td class="px-3 py-1.5">${esc(r['Referencia compra'])}</td>
+              <td class="px-3 py-1.5 font-medium">${esc(r['Canal Inicial'] || '')}</td>
               <td class="px-3 py-1.5">${esc(r['EMBARQUE'] || '')}</td>
               <td class="px-3 py-1.5 num">${fn(r['Cantidad'])}</td>
               <td class="px-3 py-1.5 num">${Number(r['FOB'] || 0).toFixed(2)}</td>
               <td class="px-3 py-1.5 num">${usd((r['Cantidad'] || 0) * (r['FOB'] || 0))}</td>
             </tr>
-          `).join('') || '<tr><td colspan="9" class="p-6 text-center text-slate-500">No hay cancelaciones (DROP) en esta temporada.</td></tr>'}
+          `).join('') || '<tr><td colspan="10" class="p-6 text-center text-slate-500">No hay cancelaciones (DROP) en esta temporada.</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -770,7 +852,7 @@ function vDrop() {
 function vCanal() {
   const g = {};
   S.rows.filter(r => st(r) === 'p').forEach(r => {
-    const c = r['Referencia compra'] || 'SIN DESTINO';
+    const c = r['Canal Final'] || r['Canal Inicial'] || r['Referencia compra'] || 'SIN DESTINO';
     if (!g[c]) g[c] = { q: 0, f: 0, l: 0 };
     g[c].q += r['Cantidad'] || 0;
     g[c].f += (r['Cantidad'] || 0) * (r['FOB'] || 0);
@@ -783,7 +865,7 @@ function vCanal() {
       <table class="w-full text-sm">
         <thead>
           <tr class="text-left text-xs text-slate-600">
-            <th class="px-3 py-2">Canal / Referencia final</th>
+            <th class="px-3 py-2">Canal Final Confirmado</th>
             <th class="px-3 py-2 text-right">Unidades P24</th>
             <th class="px-3 py-2 text-right">% del total</th>
             <th class="px-3 py-2 text-right">FOB</th>
