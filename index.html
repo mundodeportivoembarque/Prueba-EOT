@@ -49,6 +49,7 @@
 <input type="file" id="fOcPrelim" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fOcFinal" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fJsonImport" accept=".json" class="hidden">
+<input type="file" id="fBrandLogo" accept="image/*" class="hidden">
 
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
 <div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
@@ -56,6 +57,20 @@
 </div>
 
 <script>
+/* ============ LOGOS SVG POR DEFECTO DE LAS MARCAS ============ */
+const DEFAULT_LOGOS = {
+  Adidas: `<svg viewBox="0 0 120 75" class="h-9 w-auto fill-white opacity-95" aria-label="Adidas">
+    <polygon points="48,52 62,52 38,12 24,12"/>
+    <polygon points="70,52 84,52 66,22 52,22"/>
+    <polygon points="92,52 106,52 94,32 80,32"/>
+    <text x="65" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold" font-size="16" letter-spacing="1.5">adidas</text>
+  </svg>`,
+  Reebok: `<svg viewBox="0 0 160 55" class="h-8 w-auto fill-white opacity-95" aria-label="Reebok">
+    <path d="M45,26 L75,8 L81,13 L53,29 Z M62,28 L98,14 L101,19 L66,32 Z M73,11 L85,31 L79,34 L68,14 Z"/>
+    <text x="80" y="49" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold" font-style="italic" font-size="16" letter-spacing="1">Reebok</text>
+  </svg>`
+};
+
 /* ============ CONFIGURACIÓN DE TIENDAS Y CANALES ============ */
 const TIENDAS_ADIDAS = new Set([
   'CITY', 'CONDADO', 'CAPUEL-CLUB EMELEC', 'EMELEC-TIENDA', 'CUENCA', 'JARDIN',
@@ -95,8 +110,9 @@ const MASTER_COLS = [
   'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura'
 ];
 const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final'];
-const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
+const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, logos: {}, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
 let db;
+let logoTargetBrand = null;
 
 const $ = id => document.getElementById(id);
 const icons = () => { try { window.lucide && lucide.createIcons(); } catch(e){} };
@@ -180,10 +196,23 @@ async function dbDelSeason(key) {
 
 const dbSeason = key => rq(db.transaction('rows').objectStore('rows').index('sb').getAll(key));
 
+async function getAllBrandRows(brand) {
+  const seasonsList = S.seasons[brand] || [];
+  const ordered = [S.season, ...seasonsList.filter(s => s !== S.season)];
+  let all = [];
+  for (const s of ordered) {
+    if (!s) continue;
+    const chunk = await dbSeason(brand + '|' + s);
+    all = all.concat(chunk);
+  }
+  return all;
+}
+
 async function saveMeta() {
   const t = db.transaction('meta', 'readwrite');
   t.objectStore('meta').put(S.seasons, 'seasons');
   t.objectStore('meta').put({ brand: S.brand, season: S.season }, 'active');
+  t.objectStore('meta').put(S.logos, 'logos');
   await txDone(t);
 }
 
@@ -199,6 +228,24 @@ async function reload() {
   S.rows = S.season ? await dbSeason(sbKey()) : [];
   await refreshCounts();
   render();
+}
+
+/* ============ GESTIÓN DE LOGOS DE MARCA ============ */
+function triggerLogoUpload(brand) {
+  logoTargetBrand = brand;
+  $('fBrandLogo').click();
+}
+
+async function handleLogoUpload(file) {
+  if (!logoTargetBrand || !file) return;
+  const reader = new FileReader();
+  reader.onload = async e => {
+    S.logos[logoTargetBrand] = e.target.result;
+    await saveMeta();
+    renderSide();
+    icons();
+  };
+  reader.readAsDataURL(file);
 }
 
 /* ============ PARSER DE EXCEL (COMPRA INICIAL) ============ */
@@ -242,6 +289,7 @@ async function parseExcelFile(file) {
     if (!r['P4 Final']) r['P4 Final'] = 0;
     if (!r['PMY Final']) r['PMY Final'] = 0;
     if (!r['Etapa']) r['Etapa'] = E10;
+    if (!r['Temporada']) r['Temporada'] = S.season;
 
     r.sb = sbKey();
     r.brand = S.brand;
@@ -346,7 +394,7 @@ async function clearSeasonData() {
 async function promptOcType() {
   await modal(
     'Selecciona el tipo de OC a cargar',
-    `<p class="text-slate-600 mb-4">Indica qué archivo vas a procesar para aplicar el tratamiento correcto:</p>
+    `<p class="text-slate-600 mb-4">El sistema buscará automáticamente en <b>todas las temporadas de ${S.brand}</b> (${(S.seasons[S.brand] || []).join(', ')}) para cruzar el archivo:</p>
      <div class="space-y-3">
        <button id="btnChoosePrelim" class="w-full text-left p-3.5 border rounded-lg hover:border-indigo-600 hover:bg-indigo-50/50 transition">
          <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="clock" class="w-4 h-4 text-indigo-600"></i> 1. OC Preliminar (Descontar de 10A a P24)</div>
@@ -376,27 +424,59 @@ const getRowVal = (o, keys) => {
   return '';
 };
 
-/* ============ 4A. CRUCE OC PRELIMINAR (DESCUENTA DE 10A A P24) ============ */
+function mergePools(...lists) {
+  const seen = new Set();
+  const res = [];
+  for (const lst of lists) {
+    if (!lst) continue;
+    for (const item of lst) {
+      if (!seen.has(item)) {
+        seen.add(item);
+        res.push(item);
+      }
+    }
+  }
+  return res;
+}
+
+/* ============ 4A. CRUCE OC PRELIMINAR MULTITEMPORADA ============ */
 async function loadOcPreliminar(file) {
   try {
-    busy('Leyendo OC preliminar…');
+    busy('Leyendo OC preliminar y cargando temporadas de ' + S.brand + '…');
     await tick();
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
     const targetSheet = wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0];
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
     if (!raw.length) throw new Error('No se encontraron filas en el archivo de OC.');
 
+    const allBrandRows = await getAllBrandRows(S.brand);
+
+    const seasonExactIndex = new Map();
+    const seasonSkuTalIndex = new Map();
     const exactIndex = new Map();
     const skuTallaIndex = new Map();
-    S.rows.forEach(r => {
+
+    allBrandRows.forEach(r => {
       if (st(r) === 'o') {
+        const temp = norm(r.season || r['Temporada']);
         const cod = norm(r['Código']);
         const col = norm(r['Color']);
         const tal = normTalla(r['Talla']);
+
+        const kSExact = `${temp}|${cod}|${col}|${tal}`;
+        const kSSkuTal = `${temp}|${cod}|${tal}`;
         const kExact = `${cod}|${col}|${tal}`;
         const kSkuTal = `${cod}|${tal}`;
+
+        if (!seasonExactIndex.has(kSExact)) seasonExactIndex.set(kSExact, []);
+        seasonExactIndex.get(kSExact).push(r);
+
+        if (!seasonSkuTalIndex.has(kSSkuTal)) seasonSkuTalIndex.set(kSSkuTal, []);
+        seasonSkuTalIndex.get(kSSkuTal).push(r);
+
         if (!exactIndex.has(kExact)) exactIndex.set(kExact, []);
         exactIndex.get(kExact).push(r);
+
         if (!skuTallaIndex.has(kSkuTal)) skuTallaIndex.set(kSkuTal, []);
         skuTallaIndex.get(kSkuTal).push(r);
       }
@@ -406,9 +486,11 @@ async function loadOcPreliminar(file) {
     const added = [];
     let matchedUnits = 0;
     let matchedLines = 0;
+    const perSeasonUnits = {};
     const unmatched = [];
 
     for (const o of raw) {
+      const temp = norm(getRowVal(o, ['Temporada', 'Season']));
       const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP']));
       const col = norm(getRowVal(o, ['Color']));
       const tal = normTalla(getRowVal(o, ['Talla']));
@@ -420,11 +502,14 @@ async function loadOcPreliminar(file) {
 
       if (!cod || qty <= 0) continue;
 
-      let pool = exactIndex.get(`${cod}|${col}|${tal}`);
-      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
-        pool = skuTallaIndex.get(`${cod}|${tal}`);
-      }
-      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+      const pool = mergePools(
+        temp ? seasonExactIndex.get(`${temp}|${cod}|${col}|${tal}`) : null,
+        exactIndex.get(`${cod}|${col}|${tal}`),
+        temp ? seasonSkuTalIndex.get(`${temp}|${cod}|${tal}`) : null,
+        skuTallaIndex.get(`${cod}|${tal}`)
+      );
+
+      if (!pool.length || !pool.some(r => r['Cantidad'] > 0)) {
         unmatched.push({ cod: o['Código'], col: o['Color'], tal: o['Talla'], qty });
         continue;
       }
@@ -433,9 +518,14 @@ async function loadOcPreliminar(file) {
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
         if (baseRow['Cantidad'] <= 0 || baseRow['Etapa'].startsWith('P24')) continue;
+        const rowSeason = baseRow.season || S.season;
+
         if (baseRow['Cantidad'] <= rem) {
-          rem -= baseRow['Cantidad'];
-          matchedUnits += baseRow['Cantidad'];
+          const take = baseRow['Cantidad'];
+          rem -= take;
+          matchedUnits += take;
+          perSeasonUnits[rowSeason] = (perSeasonUnits[rowSeason] || 0) + take;
+
           baseRow['Etapa'] = EP;
           if (fact) baseRow['Factura'] = fact;
           if (fFact) baseRow['Fecha de factura'] = fFact;
@@ -454,6 +544,7 @@ async function loadOcPreliminar(file) {
 
           baseRow['Cantidad'] -= rem;
           matchedUnits += rem;
+          perSeasonUnits[rowSeason] = (perSeasonUnits[rowSeason] || 0) + rem;
           rem = 0;
           changed.add(baseRow);
           added.push(facturada);
@@ -463,11 +554,16 @@ async function loadOcPreliminar(file) {
     }
 
     busy();
+    const breakdown = Object.entries(perSeasonUnits)
+      .map(([sName, u]) => `<span class="inline-block bg-slate-100 border px-2 py-0.5 rounded text-xs font-semibold mr-1.5">${esc(sName)}: ${fn(u)} unid.</span>`)
+      .join('');
+
     const ch = await modal(
       'Confirmar cruce preliminar',
-      `<p>Se descontaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasan a <b>P24</b>.</p>
-       <p class="text-xs text-slate-500 mt-1">El saldo 10A ha quedado liberado para tus siguientes embarques.</p>
-       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en la compra inicial.</p>` : ''}`,
+      `<p>Se descontaron con éxito <b>${fn(matchedUnits)} unidades</b> en ${fn(matchedLines)} líneas que pasan a <b>P24</b>:</p>
+       <div class="my-2">${breakdown || '<span class="text-xs text-slate-400">Sin unidades cruzadas</span>'}</div>
+       <p class="text-xs text-slate-500 mt-1">El saldo 10A ha quedado liberado en sus respectivas temporadas.</p>
+       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo disponible en ninguna temporada de ${S.brand}.</p>` : ''}`,
       [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
     );
     if (ch !== 'ok') return;
@@ -485,30 +581,39 @@ async function loadOcPreliminar(file) {
   }
 }
 
-/* ============ 4B. CRUCE OC FINAL DE PRODUCTO (INYECTA CANALES Y PRECIOS A P24) ============ */
+/* ============ 4B. CRUCE OC FINAL DE PRODUCTO MULTITEMPORADA ============ */
 async function loadOcFinalProducto(file) {
   try {
-    busy('Leyendo OC final de Producto…');
+    busy('Leyendo OC final de Producto en temporadas de ' + S.brand + '…');
     await tick();
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
     const targetSheet = wb.Sheets['Hoja1'] ? 'Hoja1' : (wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0]);
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
     if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC de Producto.');
 
+    const allBrandRows = await getAllBrandRows(S.brand);
+
+    const p24SeasonExact = new Map();
     const p24ExactIndex = new Map();
     const p24SkuTalIndex = new Map();
+    const p24FallbackIndex = new Map();
 
-    S.rows.forEach(r => {
+    allBrandRows.forEach(r => {
       if (st(r) === 'p') {
+        const temp = norm(r.season || r['Temporada']);
         const cod = norm(r['Código']);
         const col = norm(r['Color']);
         const tal = normTalla(r['Talla']);
         const emb = norm(r['EMBARQUE']);
         const fact = norm(r['Factura']);
         
+        const kSExact = `${temp}|${cod}|${col}|${tal}|${emb}|${fact}`;
         const kExact = `${cod}|${col}|${tal}|${emb}|${fact}`;
         const kSkuTal = `${cod}|${tal}|${emb}|${fact}`;
         const kFallback = `${cod}|${col}|${tal}`;
+
+        if (!p24SeasonExact.has(kSExact)) p24SeasonExact.set(kSExact, []);
+        p24SeasonExact.get(kSExact).push(r);
 
         if (!p24ExactIndex.has(kExact)) p24ExactIndex.set(kExact, []);
         p24ExactIndex.get(kExact).push(r);
@@ -516,8 +621,8 @@ async function loadOcFinalProducto(file) {
         if (!p24SkuTalIndex.has(kSkuTal)) p24SkuTalIndex.set(kSkuTal, []);
         p24SkuTalIndex.get(kSkuTal).push(r);
 
-        if (!p24ExactIndex.has(kFallback)) p24ExactIndex.set(kFallback, []);
-        p24ExactIndex.get(kFallback).push(r);
+        if (!p24FallbackIndex.has(kFallback)) p24FallbackIndex.set(kFallback, []);
+        p24FallbackIndex.get(kFallback).push(r);
       }
     });
 
@@ -525,9 +630,11 @@ async function loadOcFinalProducto(file) {
     const added = [];
     let updatedUnits = 0;
     let updatedLines = 0;
+    const perSeasonUnits = {};
     const unmatched = [];
 
     for (const o of raw) {
+      const temp = norm(getRowVal(o, ['Temporada', 'Season']));
       const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP']));
       const col = norm(getRowVal(o, ['Color']));
       const tal = normTalla(getRowVal(o, ['Talla']));
@@ -544,15 +651,14 @@ async function loadOcFinalProducto(file) {
 
       if (!cod || qty <= 0) continue;
 
-      let pool = p24ExactIndex.get(`${cod}|${col}|${tal}|${emb}|${fact}`);
-      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
-        pool = p24SkuTalIndex.get(`${cod}|${tal}|${emb}|${fact}`);
-      }
-      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
-        pool = p24ExactIndex.get(`${cod}|${col}|${tal}`);
-      }
+      const pool = mergePools(
+        temp ? p24SeasonExact.get(`${temp}|${cod}|${col}|${tal}|${emb}|${fact}`) : null,
+        p24ExactIndex.get(`${cod}|${col}|${tal}|${emb}|${fact}`),
+        p24SkuTalIndex.get(`${cod}|${tal}|${emb}|${fact}`),
+        p24FallbackIndex.get(`${cod}|${col}|${tal}`)
+      );
 
-      if (!pool || !pool.some(r => r['Cantidad'] > 0)) {
+      if (!pool.length || !pool.some(r => r['Cantidad'] > 0)) {
         unmatched.push({ cod: o['Código'], col: o['Color'], tal: o['Talla'], qty });
         continue;
       }
@@ -561,10 +667,14 @@ async function loadOcFinalProducto(file) {
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
         if (baseRow['Cantidad'] <= 0) continue;
+        const rowSeason = baseRow.season || S.season;
 
         if (baseRow['Cantidad'] <= rem) {
-          rem -= baseRow['Cantidad'];
-          updatedUnits += baseRow['Cantidad'];
+          const take = baseRow['Cantidad'];
+          rem -= take;
+          updatedUnits += take;
+          perSeasonUnits[rowSeason] = (perSeasonUnits[rowSeason] || 0) + take;
+
           if (cFinal) baseRow['Canal Final'] = cFinal;
           if (pvpFin) baseRow['PVP Final'] = pvpFin;
           if (p4Fin) baseRow['P4 Final'] = p4Fin;
@@ -581,6 +691,7 @@ async function loadOcFinalProducto(file) {
 
           baseRow['Cantidad'] -= rem;
           updatedUnits += rem;
+          perSeasonUnits[rowSeason] = (perSeasonUnits[rowSeason] || 0) + rem;
           rem = 0;
           changed.add(baseRow);
           added.push(splitRow);
@@ -590,11 +701,16 @@ async function loadOcFinalProducto(file) {
     }
 
     busy();
+    const breakdown = Object.entries(perSeasonUnits)
+      .map(([sName, u]) => `<span class="inline-block bg-slate-100 border px-2 py-0.5 rounded text-xs font-semibold mr-1.5">${esc(sName)}: ${fn(u)} unid.</span>`)
+      .join('');
+
     const ch = await modal(
       'Confirmar actualización final de Producto',
-      `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con sus <b>Canales Finales y Precios Confirmados</b>.</p>
+      `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con sus <b>Canales Finales y Precios Confirmados</b>:</p>
+       <div class="my-2">${breakdown || '<span class="text-xs text-slate-400">Sin unidades actualizadas</span>'}</div>
        <p class="text-xs text-slate-500 mt-1">Tu compra inicial 10A no se vio alterada.</p>
-       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron registro P24 previo para actualizar.</p>` : ''}`,
+       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron registro P24 previo en las temporadas de ${S.brand}.</p>` : ''}`,
       [['Cancelar', 'c'], ['Actualizar líneas P24', 'ok', 1]]
     );
     if (ch !== 'ok') return;
@@ -619,7 +735,7 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '4.0',
+      version: '4.1',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
@@ -730,9 +846,21 @@ function render() {
 }
 
 function renderSide() {
-  $('side').innerHTML = Object.keys(S.seasons).map(b => `
-    <div class="mb-2">
-      <div class="px-5 pt-3 pb-1 text-sm font-semibold text-white">${b}</div>
+  $('side').innerHTML = Object.keys(S.seasons).map(b => {
+    const customImg = S.logos[b];
+    const logoHtml = customImg
+      ? `<img src="${customImg}" alt="${esc(b)}" class="h-10 max-w-[140px] object-contain">`
+      : (DEFAULT_LOGOS[b] || '');
+
+    return `
+    <div class="mb-4 pb-2 border-b border-white/5 last:border-b-0">
+      <div class="group/brand px-5 pt-3 pb-1 flex items-center justify-between">
+        <span class="text-sm font-semibold text-white tracking-wide">${b}</span>
+        <button onclick="triggerLogoUpload('${b}')" title="Cambiar foto/logo de ${b}" class="opacity-0 group-hover/brand:opacity-100 text-slate-400 hover:text-white transition p-1 rounded hover:bg-white/10">
+          <i data-lucide="image-plus" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+      ${logoHtml ? `<div class="px-5 py-2 flex items-center justify-start">${logoHtml}</div>` : ''}
       ${S.seasons[b].map(s => {
         const on = S.brand === b && S.season === s;
         return `<div class="group flex items-center mx-2 rounded ${on ? 'bg-white/15 text-white' : 'hover:bg-white/5'}">
@@ -746,7 +874,7 @@ function renderSide() {
         <i data-lucide="plus" class="inline w-4 h-4 -mt-0.5"></i> Nueva Temporada
       </button>
     </div>
-  `).join('');
+  `}).join('');
 }
 
 async function pick(b, s) {
@@ -1027,6 +1155,7 @@ $('fBuyExtra').onchange = e => { const f = e.target.files[0]; e.target.value = '
 $('fOcPrelim').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcPreliminar(f); };
 $('fOcFinal').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcFinalProducto(f); };
 $('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importJsonBackup(f); };
+$('fBrandLogo').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleLogoUpload(f); };
 
 (async () => {
   try {
@@ -1036,6 +1165,8 @@ $('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value =
     db = await openDB();
     const m = await rq(db.transaction('meta').objectStore('meta').get('seasons'));
     if (m) S.seasons = m;
+    const savedLogos = await rq(db.transaction('meta').objectStore('meta').get('logos'));
+    if (savedLogos) S.logos = savedLogos;
     const act = await rq(db.transaction('meta').objectStore('meta').get('active'));
     if (act && act.brand && act.season) {
       S.brand = act.brand;
