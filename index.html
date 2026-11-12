@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sistema Tracking de Compra · MEDEPORT</title>
+<title>Sistema de Tracking de Compra - Medeport</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
   const _origWarn = console.warn;
@@ -31,12 +31,12 @@
 </head>
 <body class="h-screen flex overflow-hidden">
 <aside class="w-64 shrink-0 flex flex-col text-slate-200" style="background:#16212e">
-  <div class="px-5 py-4 border-b border-white/10 flex items-center justify-between">
-    <div>
-      <div class="font-bold text-white text-lg">EOT</div>
-      <div class="text-xs text-slate-400">Elastic Order Tracking</div>
+  <div class="px-5 py-4 border-b border-white/10 flex items-start justify-between gap-2">
+    <div class="min-w-0">
+      <div class="font-bold text-white text-sm leading-snug">Sistema de Tracking de Compra</div>
+      <div class="text-xs text-slate-400 font-medium mt-0.5">Medeport</div>
     </div>
-    <div id="persistBadge" class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Base de Datos Local IndexedDB">
+    <div id="persistBadge" class="shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5" title="Base de Datos Local IndexedDB">
       <span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local
     </div>
   </div>
@@ -634,7 +634,7 @@ function exportJsonBackup() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `EOT_${S.brand}_${S.season}_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `Tracking_Compra_Medeport_${S.brand}_${S.season}_${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -651,7 +651,7 @@ async function importJsonBackup(file) {
     const data = JSON.parse(text);
 
     if (!data.rows || !Array.isArray(data.rows)) {
-      throw new Error('El archivo JSON no tiene el formato de respaldo válido de EOT.');
+      throw new Error('El archivo JSON no tiene el formato de respaldo válido del sistema.');
     }
 
     const b = data.brand || S.brand;
