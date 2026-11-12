@@ -19,7 +19,8 @@
 <style>
   body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:#eef0ee;color:#18212b}
   .num{font-variant-numeric:tabular-nums;text-align:right}
-  thead th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:0 1px 0 #d5d9d6}
+  thead th{position:sticky;top:0;background:#fff;z-index:2;box-shadow:0 1px 0 #d5d9d6}
+  tfoot td{position:sticky;bottom:0;background:#f8fafc;z-index:2;box-shadow:0 -1px 0 #cbd5e1}
   .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem .8rem;border-radius:.375rem;font-size:.85rem;font-weight:500;border:1px solid #c9cfcb;background:#fff;cursor:pointer}
   .btn:hover{background:#f3f5f3}.btn-p{background:#243b6b;color:#fff;border-color:#243b6b}.btn-p:hover{background:#1c2f57}
   .btn-danger{background:#fff;color:#b91c1c;border-color:#fca5a5}.btn-danger:hover{background:#fef2f2}
@@ -110,7 +111,18 @@ const MASTER_COLS = [
   'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura'
 ];
 const NUM_COLS = ['Cantidad', 'FOB', 'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final'];
-const S = { brand: 'Adidas', season: 'FW26', rows: [], tab: 'dash', seasons: { Adidas: ['FW26'], Reebok: ['FW26'] }, logos: {}, counts: {}, f: { q: '', etapa: '', canal: '' }, page: 1, size: 50 };
+const S = {
+  brand: 'Adidas',
+  season: 'FW26',
+  rows: [],
+  tab: 'dash',
+  seasons: { Adidas: ['FW26'], Reebok: ['FW26'] },
+  logos: {},
+  counts: {},
+  f: { q: '', etapa: '', canal: '', canalFinal: '', embarque: '', quincena: '' },
+  page: 1,
+  size: 50
+};
 let db;
 let logoTargetBrand = null;
 
@@ -130,6 +142,19 @@ function fdate(v) {
   if (!v) return '';
   if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
   return String(v).trim();
+}
+
+function getQuincena(fechaStr) {
+  const s = String(fechaStr || '').trim();
+  if (!s) return '';
+  let day = 0;
+  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(s)) {
+    day = parseInt(s.split('-')[2], 10);
+  } else if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s)) {
+    day = parseInt(s.split('/')[0], 10);
+  }
+  if (!day || isNaN(day)) return '';
+  return day <= 15 ? 'q1' : 'q2';
 }
 
 function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
@@ -908,8 +933,7 @@ function renderMain() {
   const tabs = [
     ['dash', 'Resumen', 'layout-dashboard'],
     ['mx', 'Matriz de seguimiento', 'table'],
-    ['drop', 'Reporte de DROPS', 'ban'],
-    ['canal', 'Resumen por canal', 'git-branch']
+    ['drop', 'Reporte de DROPS', 'ban']
   ];
   m.innerHTML = `
     <header class="bg-white border-b px-6 pt-4">
@@ -934,7 +958,7 @@ function renderMain() {
     </header>
     <section class="flex-1 min-h-0 overflow-y-auto p-6" id="view"></section>
   `;
-  ({ dash: vDash, mx: vMx, drop: vDrop, canal: vCanal })[S.tab]();
+  ({ dash: vDash, mx: vMx, drop: vDrop })[S.tab]();
 }
 
 function kpi(l, v, sub, c) {
@@ -982,50 +1006,114 @@ function vDash() {
 }
 
 function vMx() {
-  const canales = [...new Set(S.rows.map(r => r['Canal Final'] || r['Canal Inicial'] || r['Referencia compra']).filter(Boolean))].sort();
+  const canalesIniciales = [...new Set(S.rows.map(r => r['Canal Inicial'] || r['Referencia compra']).filter(Boolean))].sort();
+  const canalesFinales = [...new Set(S.rows.map(r => r['Canal Final']).filter(Boolean))].sort();
+  const embarques = [...new Set(S.rows.map(r => r['EMBARQUE']).filter(Boolean))].sort();
+
   $('view').innerHTML = `
     <div class="flex flex-wrap gap-2 mb-3">
-      <input id="q" class="border rounded px-3 py-2 text-sm w-64" placeholder="Buscar Código, Embarque, Factura..." value="${esc(S.f.q)}">
-      <select id="fe" class="border rounded px-2 text-sm">
+      <input id="q" class="border rounded px-3 py-2 text-sm w-60 bg-white" placeholder="Buscar Código, Factura..." value="${esc(S.f.q)}">
+      <select id="fe" class="border rounded px-2.5 py-2 text-sm bg-white">
         <option value="">Todas las etapas</option>
         <option value="o">10A · Disponible</option>
         <option value="p">P24 · Embarque</option>
         <option value="d">DROP · Cancelado</option>
       </select>
-      <select id="fc" class="border rounded px-2 text-sm">
-        <option value="">Todos los canales</option>
-        ${canales.map(c => `<option>${esc(c)}</option>`).join('')}
+      <select id="fc" class="border rounded px-2.5 py-2 text-sm bg-white">
+        <option value="">Todos los canales iniciales</option>
+        ${canalesIniciales.map(c => `<option>${esc(c)}</option>`).join('')}
+      </select>
+      <select id="fcf" class="border rounded px-2.5 py-2 text-sm bg-white">
+        <option value="">Todos los canales finales</option>
+        <option value="__EMPTY__">Sin canal final (Pendiente)</option>
+        ${canalesFinales.map(c => `<option>${esc(c)}</option>`).join('')}
+      </select>
+      <select id="femb" class="border rounded px-2.5 py-2 text-sm bg-white">
+        <option value="">Todos los embarques</option>
+        <option value="__EMPTY__">Sin embarque asignado</option>
+        ${embarques.map(e => `<option>${esc(e)}</option>`).join('')}
+      </select>
+      <select id="fq" class="border rounded px-2.5 py-2 text-sm bg-white">
+        <option value="">Todas las fechas factura</option>
+        <option value="q1">1ra Quincena (Días 1 - 15)</option>
+        <option value="q2">2da Quincena (Días 16 - 31)</option>
+        <option value="__EMPTY__">Sin fecha de factura</option>
       </select>
     </div>
     <div id="tbl"></div>
   `;
   $('fe').value = S.f.etapa;
   $('fc').value = S.f.canal;
+  $('fcf').value = S.f.canalFinal;
+  $('femb').value = S.f.embarque;
+  $('fq').value = S.f.quincena;
+
   let t;
   const go = () => {
-    S.f = { q: $('q').value, etapa: $('fe').value, canal: $('fc').value };
+    S.f = {
+      q: $('q').value,
+      etapa: $('fe').value,
+      canal: $('fc').value,
+      canalFinal: $('fcf').value,
+      embarque: $('femb').value,
+      quincena: $('fq').value
+    };
     S.page = 1;
     clearTimeout(t);
-    t = setTimeout(drawMx, 200);
+    t = setTimeout(drawMx, 180);
   };
-  ['q', 'fe', 'fc'].forEach(i => $(i).oninput = go);
+  ['q', 'fe', 'fc', 'fcf', 'femb', 'fq'].forEach(i => $(i).oninput = go);
   drawMx();
 }
 
 function drawMx() {
   const f = S.f, q = f.q.toLowerCase();
-  const rows = S.rows.filter(r => 
-    (!f.etapa || st(r) === f.etapa) &&
-    (!f.canal || r['Canal Final'] === f.canal || r['Canal Inicial'] === f.canal || r['Referencia compra'] === f.canal) &&
-    (!q || (String(r['Código']) + ' ' + String(r['Descripción']) + ' ' + String(r['Factura']) + ' ' + String(r['EMBARQUE'])).toLowerCase().includes(q))
-  );
+  const rows = S.rows.filter(r => {
+    if (f.etapa && st(r) !== f.etapa) return false;
+    if (f.canal && r['Canal Inicial'] !== f.canal && r['Referencia compra'] !== f.canal) return false;
+
+    if (f.canalFinal) {
+      if (f.canalFinal === '__EMPTY__') {
+        if (r['Canal Final']) return false;
+      } else if (r['Canal Final'] !== f.canalFinal) {
+        return false;
+      }
+    }
+
+    if (f.embarque) {
+      if (f.embarque === '__EMPTY__') {
+        if (r['EMBARQUE']) return false;
+      } else if (r['EMBARQUE'] !== f.embarque) {
+        return false;
+      }
+    }
+
+    if (f.quincena) {
+      const qVal = getQuincena(r['Fecha de factura']);
+      if (f.quincena === '__EMPTY__') {
+        if (qVal) return false;
+      } else if (qVal !== f.quincena) {
+        return false;
+      }
+    }
+
+    if (q) {
+      const hay = (String(r['Código']) + ' ' + String(r['Descripción']) + ' ' + String(r['Factura']) + ' ' + String(r['EMBARQUE'])).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+
+    return true;
+  });
+
+  const totalCantidad = rows.reduce((acc, r) => acc + (Number(r['Cantidad']) || 0), 0);
   const pg = rows.slice((S.page - 1) * S.size, S.page * S.size);
+
   $('tbl').innerHTML = `
-    <div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 290px)">
+    <div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 300px)">
       <table class="w-full text-sm">
         <thead>
           <tr class="text-left text-xs text-slate-600">
-            ${['Seg.', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'Cant.', 'FOB', 'PVP', 'PVP Final', 'Factura', 'Embarque'].map((h, i) => `<th class="px-3 py-2 whitespace-nowrap ${i >= 9 && i <= 12 ? 'text-right' : ''}">${h}</th>`).join('')}
+            ${['Seg.', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'Cant.', 'FOB', 'PVP', 'PVP Final', 'Factura', 'F. Factura', 'Embarque'].map((h, i) => `<th class="px-3 py-2 whitespace-nowrap ${i >= 9 && i <= 12 ? 'text-right' : ''}">${h}</th>`).join('')}
           </tr>
         </thead>
         <tbody>
@@ -1045,10 +1133,19 @@ function drawMx() {
               <td class="px-3 py-1.5 num">${Number(r['PVP'] || 0).toFixed(2)}</td>
               <td class="px-3 py-1.5 num font-semibold text-emerald-800">${Number(r['PVP Final'] || 0) ? Number(r['PVP Final']).toFixed(2) : '-'}</td>
               <td class="px-3 py-1.5 font-medium">${esc(r['Factura'])}</td>
+              <td class="px-3 py-1.5 whitespace-nowrap text-xs text-slate-600">${esc(r['Fecha de factura'] || '')}</td>
               <td class="px-3 py-1.5 font-semibold text-slate-700 whitespace-nowrap">${esc(r['EMBARQUE'] || '')}</td>
             </tr>
-          `).join('') || '<tr><td colspan="15" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
+          `).join('') || '<tr><td colspan="16" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
         </tbody>
+        ${rows.length ? `
+        <tfoot>
+          <tr class="font-semibold text-slate-800 text-sm">
+            <td colspan="9" class="px-3 py-2.5 text-right text-xs uppercase tracking-wider text-slate-500">Total unidades filtradas:</td>
+            <td class="px-3 py-2.5 num font-bold text-slate-900 text-base">${fn(totalCantidad)}</td>
+            <td colspan="6" class="px-3 py-2.5"></td>
+          </tr>
+        </tfoot>` : ''}
       </table>
     </div>
     ${pager(rows.length)}
@@ -1062,7 +1159,7 @@ function pager(n) {
     <div class="flex items-center gap-2 text-sm mt-3">
       <span class="text-slate-600">${fn(n)} filas</span>
       <span class="ml-auto"></span>
-      <select class="border rounded px-2 py-1" onchange="S.size=+this.value;S.page=1;drawMx()">
+      <select class="border rounded px-2 py-1 bg-white" onchange="S.size=+this.value;S.page=1;drawMx()">
         ${[50, 100, 200].map(x => `<option ${x === S.size ? 'selected' : ''}>${x}</option>`).join('')}
       </select>
       <button class="btn" ${S.page < 2 ? 'disabled' : ''} onclick="S.page--;drawMx()">Anterior</button>
@@ -1106,43 +1203,6 @@ function vDrop() {
               <td class="px-3 py-1.5 num">${usd((r['Cantidad'] || 0) * (r['FOB'] || 0))}</td>
             </tr>
           `).join('') || '<tr><td colspan="10" class="p-6 text-center text-slate-500">No hay cancelaciones (DROP) en esta temporada.</td></tr>'}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-function vCanal() {
-  const g = {};
-  S.rows.filter(r => st(r) === 'p').forEach(r => {
-    const c = r['Canal Final'] || r['Canal Inicial'] || r['Referencia compra'] || 'SIN DESTINO';
-    if (!g[c]) g[c] = { q: 0, f: 0, l: 0 };
-    g[c].q += r['Cantidad'] || 0;
-    g[c].f += (r['Cantidad'] || 0) * (r['FOB'] || 0);
-    g[c].l++;
-  });
-  const L = Object.entries(g).sort((a, b) => b[1].q - a[1].q);
-  const tot = L.reduce((a, e) => a + e[1].q, 0);
-  $('view').innerHTML = `
-    <div class="bg-white border rounded-lg overflow-auto max-w-3xl">
-      <table class="w-full text-sm">
-        <thead>
-          <tr class="text-left text-xs text-slate-600">
-            <th class="px-3 py-2">Canal Final Confirmado</th>
-            <th class="px-3 py-2 text-right">Unidades P24</th>
-            <th class="px-3 py-2 text-right">% del total</th>
-            <th class="px-3 py-2 text-right">FOB</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${L.map(([c, x]) => `
-            <tr class="border-t">
-              <td class="px-3 py-2 font-medium">${esc(c)}</td>
-              <td class="px-3 py-2 num font-semibold">${fn(x.q)}</td>
-              <td class="px-3 py-2 num">${tot ? (x.q / tot * 100).toFixed(1) : 0}%</td>
-              <td class="px-3 py-2 num">${usd(x.f)}</td>
-            </tr>
-          `).join('') || '<tr><td colspan="4" class="p-6 text-center text-slate-500">No hay unidades en P24 aún.</td></tr>'}
         </tbody>
       </table>
     </div>
