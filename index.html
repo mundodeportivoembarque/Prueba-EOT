@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EOT · Elastic Order Tracking</title>
+<title>Sistema Tracking de Compra · MEDEPORT</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
   const _origWarn = console.warn;
@@ -36,7 +36,7 @@
       <div class="font-bold text-white text-lg">EOT</div>
       <div class="text-xs text-slate-400">Elastic Order Tracking</div>
     </div>
-    <div class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Base de Datos Local IndexedDB">
+    <div id="persistBadge" class="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full" title="Base de Datos Local IndexedDB">
       <span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local
     </div>
   </div>
@@ -183,6 +183,7 @@ const dbSeason = key => rq(db.transaction('rows').objectStore('rows').index('sb'
 async function saveMeta() {
   const t = db.transaction('meta', 'readwrite');
   t.objectStore('meta').put(S.seasons, 'seasons');
+  t.objectStore('meta').put({ brand: S.brand, season: S.season }, 'active');
   await txDone(t);
 }
 
@@ -271,6 +272,7 @@ async function loadBuyInitial(file) {
     await tick();
     await dbDelSeason(sbKey());
     await dbAdd(rows, 'Guardando');
+    await saveMeta();
     await reload();
     busy();
     modal('Compra Inicial Cargada', `Se cargaron con éxito ${fn(rows.length)} filas en <b>${S.brand} ${S.season}</b>.`);
@@ -342,7 +344,7 @@ async function clearSeasonData() {
 
 /* ============ 4. MODAL SELECTOR DE TIPO DE OC ============ */
 async function promptOcType() {
-  const c = await modal(
+  await modal(
     'Selecciona el tipo de OC a cargar',
     `<p class="text-slate-600 mb-4">Indica qué archivo vas a procesar para aplicar el tratamiento correcto:</p>
      <div class="space-y-3">
@@ -493,7 +495,6 @@ async function loadOcFinalProducto(file) {
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
     if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC de Producto.');
 
-    // Indexar exclusivamente filas que ya están en P24
     const p24ExactIndex = new Map();
     const p24SkuTalIndex = new Map();
 
@@ -505,7 +506,6 @@ async function loadOcFinalProducto(file) {
         const emb = norm(r['EMBARQUE']);
         const fact = norm(r['Factura']);
         
-        // Llaves compuestas con Factura/Embarque para asegurar que actualizamos el embarque correcto
         const kExact = `${cod}|${col}|${tal}|${emb}|${fact}`;
         const kSkuTal = `${cod}|${tal}|${emb}|${fact}`;
         const kFallback = `${cod}|${col}|${tal}`;
@@ -571,7 +571,6 @@ async function loadOcFinalProducto(file) {
           if (pmyFin) baseRow['PMY Final'] = pmyFin;
           changed.add(baseRow);
         } else {
-          // Split dentro de P24 por redistribución de Producto
           const splitRow = { ...baseRow };
           delete splitRow.id;
           splitRow['Cantidad'] = rem;
@@ -670,11 +669,11 @@ async function importJsonBackup(file) {
 
     if (!S.seasons[b]) S.seasons[b] = [];
     if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
-    await saveMeta();
 
     S.brand = b;
     S.season = s;
     const targetKey = b + '|' + s;
+    await saveMeta();
 
     busy('Guardando datos en la base local…');
     await tick();
@@ -755,6 +754,7 @@ async function pick(b, s) {
   S.page = 1;
   busy('Cargando…');
   await tick();
+  await saveMeta();
   await reload();
   busy();
 }
@@ -765,7 +765,6 @@ async function newSeason(b) {
   const n = $('ns').value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
   if (!n || S.seasons[b].includes(n)) return;
   S.seasons[b].push(n);
-  await saveMeta();
   await pick(b, n);
 }
 
@@ -1031,11 +1030,18 @@ $('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value =
 
 (async () => {
   try {
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().catch(() => {});
+    }
     db = await openDB();
     const m = await rq(db.transaction('meta').objectStore('meta').get('seasons'));
     if (m) S.seasons = m;
-    await refreshCounts();
-    render();
+    const act = await rq(db.transaction('meta').objectStore('meta').get('active'));
+    if (act && act.brand && act.season) {
+      S.brand = act.brand;
+      S.season = act.season;
+    }
+    await reload();
   } catch(e) {
     document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB: ' + esc(e.message) + '</p>';
   }
