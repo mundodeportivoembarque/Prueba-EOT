@@ -59,18 +59,10 @@
 </div>
 
 <script>
-/* ============ LOGOS SVG POR DEFECTO DE LAS MARCAS ============ */
+/* ============ LOGOS OFICIALES INCRUSTADOS DE LAS MARCAS ============ */
 const DEFAULT_LOGOS = {
-  Adidas: `<svg viewBox="0 0 120 75" class="h-9 w-auto fill-white opacity-95" aria-label="Adidas">
-    <polygon points="48,52 62,52 38,12 24,12"/>
-    <polygon points="70,52 84,52 66,22 52,22"/>
-    <polygon points="92,52 106,52 94,32 80,32"/>
-    <text x="65" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold" font-size="16" letter-spacing="1.5">adidas</text>
-  </svg>`,
-  Reebok: `<svg viewBox="0 0 160 55" class="h-8 w-auto fill-white opacity-95" aria-label="Reebok">
-    <path d="M45,26 L75,8 L81,13 L53,29 Z M62,28 L98,14 L101,19 L66,32 Z M73,11 L85,31 L79,34 L68,14 Z"/>
-    <text x="80" y="49" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold" font-style="italic" font-size="16" letter-spacing="1">Reebok</text>
-  </svg>`
+  Adidas: `<img src="data:image/png;base64,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" alt="Adidas" class="h-11 w-auto object-contain">`,
+  Reebok: `<img src="data:image/png;base64,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" alt="Reebok" class="h-10 w-auto object-contain">`
 };
 
 /* ============ CONFIGURACIÓN DE TIENDAS Y CANALES ============ */
@@ -430,7 +422,6 @@ async function promptDeleteOcs() {
     return modal('Sin OCs cargadas', 'No existen registros facturados (P24) en esta temporada para revertir.');
   }
 
-  // Agrupar OCs por Factura y Embarque
   const groups = new Map();
   p24Rows.forEach(r => {
     const fact = String(r['Factura'] || '').trim() || 'SIN FACTURA';
@@ -496,7 +487,6 @@ async function revertOcsByKeys(selectedKeys) {
   busy('Revirtiendo OCs y consolidando saldos 10A…');
   await tick();
 
-  // Indexar filas 10A existentes para re-unificar splits si existen
   const pool10A = new Map();
   S.rows.forEach(r => {
     if (st(r) === 'o') {
@@ -523,12 +513,10 @@ async function revertOcsByKeys(selectedKeys) {
     const existing10A = pool10A.get(mergeKey);
 
     if (existing10A && existing10A.id !== r.id) {
-      // Sumar cantidad de vuelta a la fila 10A original y marcar esta línea dividida para borrar
       existing10A['Cantidad'] = (Number(existing10A['Cantidad']) || 0) + qty;
       toUpdate.add(existing10A);
       if (r.id != null) toDeleteIds.push(r.id);
     } else {
-      // Convertir esta fila directamente de vuelta a 10A limpia
       r['Etapa'] = E10;
       r['Factura'] = '';
       r['Fecha de factura'] = '';
@@ -895,7 +883,7 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '4.2',
+      version: '4.3',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
