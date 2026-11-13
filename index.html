@@ -113,7 +113,7 @@ const $ = id => document.getElementById(id);
 const icons = () => { try { window.lucide && lucide.createIcons(); } catch(e){} };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fn = n => Number(n || 0).toLocaleString('es');
-const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '');
 const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
 const sbKey = () => S.brand + '|' + S.season;
@@ -590,6 +590,12 @@ const getRowVal = (o, keys) => {
   for (const k of keys) {
     if (o[k] !== undefined && o[k] !== '') return o[k];
   }
+  const normKeys = keys.map(k => norm(k));
+  for (const origKey of Object.keys(o)) {
+    if (normKeys.includes(norm(origKey)) && o[origKey] !== undefined && o[origKey] !== '') {
+      return o[origKey];
+    }
+  }
   return '';
 };
 function mergePools(...lists) {
@@ -727,7 +733,7 @@ async function loadOcPreliminar(file) {
     modal('Error en cruce preliminar', esc(e.message || e));
   }
 }
-/* ============ 4B. CRUCE OC FINAL DE PRODUCTO MULTITEMPORADA ============ */
+/* ============ 4B. CRUCE OC FINAL DE PRODUCTO MULTITEMPORADA (SIN SOBRESCRITURA) ============ */
 async function loadOcFinalProducto(file) {
   try {
     busy('Leyendo OC final de Producto en temporadas de ' + S.brand + '…');
@@ -736,68 +742,112 @@ async function loadOcFinalProducto(file) {
     const targetSheet = wb.Sheets['Hoja1'] ? 'Hoja1' : (wb.Sheets['OC'] ? 'OC' : wb.SheetNames[0]);
     const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
     if (!raw.length) throw new Error('No se encontraron filas en la hoja de OC de Producto.');
+
+    // Detectar qué lotes (Embarque + Factura) vienen en el Excel para limpiarlos antes de reasignar
+    const fileBatches = new Set();
+    const fileInvoices = new Set();
+    for (const o of raw) {
+      const fact = norm(getRowVal(o, ['Factura', 'No FACTURA', 'No FACTURA ']));
+      const emb = norm(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES']));
+      if (emb || fact) fileBatches.add(`${emb}|${fact}`);
+      if (fact) fileInvoices.add(fact);
+    }
+
     const allBrandRows = await getAllBrandRows(S.brand);
+    const changed = new Set();
+
+    // Limpiar Canal Final previo únicamente en las filas P24 de los embarques/facturas presentes en este archivo
+    allBrandRows.forEach(r => {
+      if (st(r) === 'p') {
+        const emb = norm(r['EMBARQUE']);
+        const fact = norm(r['Factura']);
+        if (fileBatches.has(`${emb}|${fact}`) || (!emb && fileInvoices.has(fact))) {
+          if (r['Canal Final'] || r['PVP Final'] || r['P4 Final'] || r['PMY Final']) {
+            r['Canal Final'] = '';
+            r['PVP Final'] = 0;
+            r['P4 Final'] = 0;
+            r['PMY Final'] = 0;
+            changed.add(r);
+          }
+        }
+      }
+    });
+
+    const p24SeasonChanExact = new Map();
+    const p24ChanExact = new Map();
     const p24SeasonExact = new Map();
     const p24ExactIndex = new Map();
     const p24SkuTalIndex = new Map();
     const p24FallbackIndex = new Map();
+
+    const pushIdx = (map, k, row) => {
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(row);
+    };
+
     allBrandRows.forEach(r => {
-      if (st(r) === 'p') {
+      if (st(r) === 'p' && !r['Canal Final']) {
         const temp = norm(r.season || r['Temporada']);
         const cod = norm(r['Código']);
         const col = norm(r['Color']);
         const tal = normTalla(r['Talla']);
         const emb = norm(r['EMBARQUE']);
         const fact = norm(r['Factura']);
-        
-        const kSExact = `${temp}|${cod}|${col}|${tal}|${emb}|${fact}`;
-        const kExact = `${cod}|${col}|${tal}|${emb}|${fact}`;
-        const kSkuTal = `${cod}|${tal}|${emb}|${fact}`;
-        const kFallback = `${cod}|${col}|${tal}`;
-        if (!p24SeasonExact.has(kSExact)) p24SeasonExact.set(kSExact, []);
-        p24SeasonExact.get(kSExact).push(r);
-        if (!p24ExactIndex.has(kExact)) p24ExactIndex.set(kExact, []);
-        p24ExactIndex.get(kExact).push(r);
-        if (!p24SkuTalIndex.has(kSkuTal)) p24SkuTalIndex.set(kSkuTal, []);
-        p24SkuTalIndex.get(kSkuTal).push(r);
-        if (!p24FallbackIndex.has(kFallback)) p24FallbackIndex.set(kFallback, []);
-        p24FallbackIndex.get(kFallback).push(r);
+        const cIni = norm(r['Canal Inicial'] || resolverCanalInicial(r['Referencia compra'], S.brand));
+
+        if (cIni) {
+          pushIdx(p24SeasonChanExact, `${temp}|${cod}|${col}|${tal}|${emb}|${fact}|${cIni}`, r);
+          pushIdx(p24ChanExact, `${cod}|${col}|${tal}|${emb}|${fact}|${cIni}`, r);
+        }
+        pushIdx(p24SeasonExact, `${temp}|${cod}|${col}|${tal}|${emb}|${fact}`, r);
+        pushIdx(p24ExactIndex, `${cod}|${col}|${tal}|${emb}|${fact}`, r);
+        pushIdx(p24SkuTalIndex, `${cod}|${tal}|${emb}|${fact}`, r);
+        pushIdx(p24FallbackIndex, `${cod}|${col}|${tal}`, r);
       }
     });
-    const changed = new Set();
+
     const added = [];
     let updatedUnits = 0;
     let updatedLines = 0;
     const perSeasonUnits = {};
     const unmatched = [];
+
     for (const o of raw) {
       const temp = norm(getRowVal(o, ['Temporada', 'Season']));
       const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP']));
       const col = norm(getRowVal(o, ['Color']));
       const tal = normTalla(getRowVal(o, ['Talla']));
       const qty = Number(String(getRowVal(o, ['Cantidad', 'QTY', 'LPN DETAIL SIZE VALUE']) || 0).replace(',', '.')) || 0;
-      const fact = norm(getRowVal(o, ['Factura', 'No FACTURA ']));
+      const fact = norm(getRowVal(o, ['Factura', 'No FACTURA', 'No FACTURA ']));
       const emb = norm(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES']));
+      const cIniRaw = getRowVal(o, ['Canal Inicial', 'CANAL INICIAL', 'Referencia compra', 'CANAL']);
+      const cIni = norm(normalizarCanal(cIniRaw));
       const cFinalRaw = getRowVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
       const cFinal = normalizarCanal(cFinalRaw);
       const pvpFin = Number(String(getRowVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
       const p4Fin = Number(String(getRowVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
       const pmyFin = Number(String(getRowVal(o, ['PMY.1', 'PMY FINAL', 'PMY Final', 'PMY']) || 0).replace(',', '.')) || 0;
       if (!cod || qty <= 0) continue;
+
       const pool = mergePools(
+        (temp && cIni) ? p24SeasonChanExact.get(`${temp}|${cod}|${col}|${tal}|${emb}|${fact}|${cIni}`) : null,
+        cIni ? p24ChanExact.get(`${cod}|${col}|${tal}|${emb}|${fact}|${cIni}`) : null,
         temp ? p24SeasonExact.get(`${temp}|${cod}|${col}|${tal}|${emb}|${fact}`) : null,
         p24ExactIndex.get(`${cod}|${col}|${tal}|${emb}|${fact}`),
         p24SkuTalIndex.get(`${cod}|${tal}|${emb}|${fact}`),
         p24FallbackIndex.get(`${cod}|${col}|${tal}`)
       );
-      if (!pool.length || !pool.some(r => r['Cantidad'] > 0)) {
-        unmatched.push({ cod: o['Código'], col: o['Color'], tal: o['Talla'], qty });
+
+      // Solo tomar filas que aún NO tienen Canal Final asignado para evitar sobrescrituras
+      if (!pool.length || !pool.some(r => r['Cantidad'] > 0 && !r['Canal Final'])) {
+        unmatched.push({ cod: getRowVal(o, ['Código', 'Codigo', 'SAP']), col: o['Color'], tal: o['Talla'], qty });
         continue;
       }
+
       let rem = qty;
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
-        if (baseRow['Cantidad'] <= 0) continue;
+        if (baseRow['Cantidad'] <= 0 || baseRow['Canal Final']) continue;
         const rowSeason = baseRow.season || S.season;
         if (baseRow['Cantidad'] <= rem) {
           const take = baseRow['Cantidad'];
@@ -810,6 +860,7 @@ async function loadOcFinalProducto(file) {
           if (pmyFin) baseRow['PMY Final'] = pmyFin;
           changed.add(baseRow);
         } else {
+          // Dividir: splitRow se lleva la parte asignada; baseRow conserva el saldo pendiente sin Canal Final
           const splitRow = { ...baseRow };
           delete splitRow.id;
           splitRow['Cantidad'] = rem;
@@ -835,8 +886,8 @@ async function loadOcFinalProducto(file) {
       'Confirmar actualización final de Producto',
       `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con sus <b>Canales Finales y Precios Confirmados</b>:</p>
        <div class="my-2">${breakdown || '<span class="text-xs text-slate-400">Sin unidades actualizadas</span>'}</div>
-       <p class="text-xs text-slate-500 mt-1">Tu compra inicial 10A no se vio alterada.</p>
-       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron registro P24 previo en las temporadas de ${S.brand}.</p>` : ''}`,
+       <p class="text-xs text-slate-500 mt-1">Tu compra inicial 10A no se vio alterada y se evitaron sobrescrituras entre líneas del mismo SKU.</p>
+       ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo P24 pendiente en las temporadas de ${S.brand}.</p>` : ''}`,
       [['Cancelar', 'c'], ['Actualizar líneas P24', 'ok', 1]]
     );
     if (ch !== 'ok') return;
@@ -859,7 +910,7 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '4.3',
+      version: '4.4',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
