@@ -1879,6 +1879,7 @@ async function loadOcFinalProducto(file) {
       const embRaw = String(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES'])).trim();
       const emb = norm(embRaw);
       const fFact = fdate(getRowVal(o, ['Fecha de factura']));
+      const fIngEmb = fdate(getRowVal(o, ['Fecha de ingreso embarque', 'Fecha ingreso embarque', 'FECHA DE INGRESO EMBARQUE', 'FECHA INGRESO EMBARQUE', 'Fecha Ingreso', 'Fecha estimada ingreso', 'Fecha Arribo']));
       const cIniRaw = getRowVal(o, ['Canal Inicial', 'CANAL INICIAL', 'Referencia compra', 'CANAL']);
       const cIni = norm(normalizarCanal(cIniRaw));
       const cFinalRaw = getRowVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
