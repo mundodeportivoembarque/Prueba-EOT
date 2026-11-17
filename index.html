@@ -1677,7 +1677,6 @@ async function loadOcPreliminar(file) {
       const embFinal = String(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES'])).trim();
       const fFact = fdate(getRowVal(o, ['Fecha de factura']));
       const fIngEmb = fdate(getRowVal(o, ['Fecha de ingreso embarque', 'Fecha ingreso embarque', 'FECHA DE INGRESO EMBARQUE', 'FECHA INGRESO EMBARQUE', 'Fecha Ingreso', 'Fecha estimada ingreso', 'Fecha Arribo']));
-      const fIngEmb = fdate(getRowVal(o, ['Fecha de ingreso embarque', 'Fecha ingreso embarque', 'FECHA DE INGRESO EMBARQUE', 'FECHA INGRESO EMBARQUE', 'Fecha Ingreso', 'Fecha estimada ingreso', 'Fecha Arribo']));
       const refFinal = String(getRowVal(o, ['Referencia compra', 'CANAL'])).trim();
       if (!cod || qty <= 0) continue;
       const pool = mergePools(
