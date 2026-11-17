@@ -83,7 +83,7 @@ function normalizarCanal(c) {
   if (s === 'EXCLUSIVO WEB' || s === 'WEB REEBOK MEDEPORT') return 'WEB';
   return s;
 }
-/* ============ LAS 37 COLUMNAS MAESTRAS (CON DETALLE COMPRA, FOB Y VALOR NETO) ============ */
+/* ============ LAS 37 COLUMNAS MAESTRAS Y COLUMNAS INICIALES (10A) ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
   'Seguimiento', 'Detalle compra', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 
@@ -94,6 +94,17 @@ const MASTER_COLS = [
   'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final',
   'Etapa', 'Documento', 'EMBARQUE', 'Fecha estimada inicio',
   'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura'
+];
+// Columnas limpias de compra inicial (sin campos finales de Producto ni facturación) para armar OC inicial (10A)
+const INITIAL_10A_COLS = [
+  'Seguimiento', 'Detalle compra', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad',
+  'Referencia compra', 'Canal Inicial',
+  'Código', 'Color', 'Talla', 'Talla marca', 'Descripción', 'Género',
+  'Fecha de entrega', 'Fecha de venta', 'Cantidad',
+  'FOB', 'Valor Neto',
+  'PVP', 'PVP retail', 'P4', 'PMY',
+  'Etapa', 'Documento', 'Fecha estimada inicio',
+  'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin'
 ];
 const NUM_COLS = ['Cantidad', 'FOB', 'Valor Neto', 'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final'];
 const S = {
@@ -242,7 +253,6 @@ async function refreshCounts() {
 }
 async function reload() {
   const rawRows = S.season ? await dbSeason(sbKey()) : [];
-  // Normalizar compatibilidad hacia atrás si existen filas previas sin Valor Neto
   rawRows.forEach(r => {
     if (r['FOB'] === undefined) r['FOB'] = 0;
     if (r['Valor Neto'] === undefined || (r['FOB'] > 0 && r['Cantidad'] > 0 && !r['Valor Neto'])) {
@@ -285,7 +295,6 @@ async function parseExcelFile(file, tipoCompra) {
     if (found) headerMap[mCol] = found;
   });
 
-  // Respaldos comunes para FOB en Excel
   if (!headerMap['FOB']) {
     const fobFallback = fileHeaders.find(h => ['fob', 'costofob', 'preciofob', 'fobunitario', 'valorfob'].includes(norm(h)));
     if (fobFallback) headerMap['FOB'] = fobFallback;
@@ -601,7 +610,7 @@ async function promptOcType() {
        </button>
        <button id="btnChooseFinal" class="w-full text-left p-3.5 border rounded-lg hover:border-emerald-600 hover:bg-emerald-50/50 transition">
          <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="check-circle" class="w-4 h-4 text-emerald-600"></i> 2. OC Final de Producto (Actualizar P24)</div>
-         <div class="text-xs text-slate-500 mt-1">Archivo devuelto por Producto. No toca el saldo 10A; inyecta Embarque, Canales Finales y Precios confirmados directamente sobre las líneas en P24.</div>
+         <div class="text-xs text-slate-500 mt-1">Archivo devuelto por Producto. No toca el saldo 10A; inyecta Embarque, Canales Finales, FOB Marca (reemplaza FOB inicial) y Precios confirmados sobre las líneas en P24.</div>
        </button>
      </div>`,
     [['Cancelar', 'c']]
@@ -654,7 +663,6 @@ async function loadOcPreliminar(file) {
     const seasonSkuTalIndex = new Map();
     const exactIndex = new Map();
     const skuTallaIndex = new Map();
-    // Índices de respaldo por Talla marca
     const seasonExactTalMIndex = new Map();
     const exactTalMIndex = new Map();
     const seasonSkuTalMIndex = new Map();
@@ -703,17 +711,14 @@ async function loadOcPreliminar(file) {
       const refFinal = String(getRowVal(o, ['Referencia compra', 'CANAL'])).trim();
       if (!cod || qty <= 0) continue;
       const pool = mergePools(
-        // 1. Coincidencia principal por Talla
         (temp && tal) ? seasonExactIndex.get(`${temp}|${cod}|${col}|${tal}`) : null,
         tal ? exactIndex.get(`${cod}|${col}|${tal}`) : null,
         (temp && tal) ? seasonSkuTalIndex.get(`${temp}|${cod}|${tal}`) : null,
         tal ? skuTallaIndex.get(`${cod}|${tal}`) : null,
-        // 2. Respaldo secundario por Talla marca
         (temp && talM) ? seasonExactTalMIndex.get(`${temp}|${cod}|${col}|${talM}`) : null,
         talM ? exactTalMIndex.get(`${cod}|${col}|${talM}`) : null,
         (temp && talM) ? seasonSkuTalMIndex.get(`${temp}|${cod}|${talM}`) : null,
         talM ? skuTalMIndex.get(`${cod}|${talM}`) : null,
-        // 3. Respaldo cruzado (Talla marca del Excel contra Talla de la base)
         (temp && talM) ? seasonExactIndex.get(`${temp}|${cod}|${col}|${talM}`) : null,
         talM ? exactIndex.get(`${cod}|${col}|${talM}`) : null
       );
@@ -785,7 +790,7 @@ async function loadOcPreliminar(file) {
     modal('Error en cruce preliminar', esc(e.message || e));
   }
 }
-/* ============ 4B. CRUCE OC FINAL DE PRODUCTO (ASIGNA EMBARQUE + DETECCIÓN DE CAMBIO DE PRECIO) ============ */
+/* ============ 4B. CRUCE OC FINAL DE PRODUCTO (REEMPLAZA FOB CON FOB MARCA + DETECCIÓN DE CAMBIO DE PRECIO) ============ */
 async function loadOcFinalProducto(file) {
   try {
     busy('Leyendo OC final de Producto en temporadas de ' + S.brand + '…');
@@ -880,6 +885,7 @@ async function loadOcFinalProducto(file) {
     const added = [];
     let updatedUnits = 0;
     let updatedLines = 0;
+    let fobUpdatedCount = 0;
     const perSeasonUnits = {};
     const unmatched = [];
     const priceChangedSkus = new Set();
@@ -900,6 +906,8 @@ async function loadOcFinalProducto(file) {
       const cIni = norm(normalizarCanal(cIniRaw));
       const cFinalRaw = getRowVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
       const cFinal = normalizarCanal(cFinalRaw);
+      // Lectura de FOB MARCA (Opción A: reemplaza FOB inicial si viene con valor > 0)
+      const fobMarca = Number(String(getRowVal(o, ['FOB MARCA', 'FOB Marca', 'FOB_MARCA', 'FOB FINAL', 'FOB Final', 'FOB.1', 'FOB']) || 0).replace(',', '.')) || 0;
       const pvpFin = Number(String(getRowVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
       const p4Fin = Number(String(getRowVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
       const pmyFin = Number(String(getRowVal(o, ['PMY.1', 'PMY FINAL', 'PMY Final', 'PMY']) || 0).replace(',', '.')) || 0;
@@ -946,6 +954,10 @@ async function loadOcFinalProducto(file) {
           if (embRaw) baseRow['EMBARQUE'] = embRaw;
           if (fFact && !baseRow['Fecha de factura']) baseRow['Fecha de factura'] = fFact;
           if (cFinal) baseRow['Canal Final'] = cFinal;
+          if (fobMarca > 0) {
+            if (Math.abs((Number(baseRow['FOB']) || 0) - fobMarca) > 0.0001) fobUpdatedCount += take;
+            baseRow['FOB'] = fobMarca;
+          }
           if (pvpFin) baseRow['PVP Final'] = pvpFin;
           if (p4Fin) baseRow['P4 Final'] = p4Fin;
           if (pmyFin) baseRow['PMY Final'] = pmyFin;
@@ -962,6 +974,10 @@ async function loadOcFinalProducto(file) {
           if (embRaw) splitRow['EMBARQUE'] = embRaw;
           if (fFact && !splitRow['Fecha de factura']) splitRow['Fecha de factura'] = fFact;
           if (cFinal) splitRow['Canal Final'] = cFinal;
+          if (fobMarca > 0) {
+            if (Math.abs((Number(splitRow['FOB']) || 0) - fobMarca) > 0.0001) fobUpdatedCount += rem;
+            splitRow['FOB'] = fobMarca;
+          }
           if (pvpFin) splitRow['PVP Final'] = pvpFin;
           if (p4Fin) splitRow['P4 Final'] = p4Fin;
           if (pmyFin) splitRow['PMY Final'] = pmyFin;
@@ -986,6 +1002,9 @@ async function loadOcFinalProducto(file) {
     const breakdown = Object.entries(perSeasonUnits)
       .map(([sName, u]) => `<span class="inline-block bg-slate-100 border px-2 py-0.5 rounded text-xs font-semibold mr-1.5">${esc(sName)}: ${fn(u)} unid.</span>`)
       .join('');
+    const fobInfoHtml = fobUpdatedCount > 0
+      ? `<p class="text-xs text-emerald-700 font-medium mt-1.5">✓ Se actualizó el <b>FOB</b> con el <b>FOB MARCA</b> en <b>${fn(fobUpdatedCount)} unidades</b> y se recalculó su Valor Neto.</p>`
+      : '';
     const priceAlertHtml = priceChangedSkus.size > 0
       ? `<div class="mt-3 p-3 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs">
            <div class="font-bold flex items-center gap-1.5 text-amber-800"><i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i> ¡Alerta de Reetiquetado Detectada!</div>
@@ -995,8 +1014,9 @@ async function loadOcFinalProducto(file) {
 
     const ch = await modal(
       'Confirmar actualización final de Producto',
-      `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con su <b>Embarque, Canales Finales y Precios Confirmados</b>:</p>
+      `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con su <b>Embarque, Canales Finales, FOB Marca y Precios Confirmados</b>:</p>
        <div class="my-2">${breakdown || '<span class="text-xs text-slate-400">Sin unidades actualizadas</span>'}</div>
+       ${fobInfoHtml}
        ${priceAlertHtml}
        <p class="text-xs text-slate-500 mt-2">Tu compra inicial 10A no se vio alterada y se asignó el nombre del embarque a las líneas cruzadas.</p>
        ${unmatched.length ? `<p class="text-amber-600 mt-2 text-xs"><b>${unmatched.length} filas</b> no encontraron saldo P24 pendiente en las temporadas de ${S.brand}.</p>` : ''}`,
@@ -1013,7 +1033,7 @@ async function loadOcFinalProducto(file) {
     if (priceChangedSkus.size > 0) {
       const goAlert = await modal(
         'OC Final Aplicada · Acción Requerida',
-        `Se actualizaron los embarques, canales finales y precios para <b>${fn(updatedUnits)} unidades</b> en <b>P24</b>.<br><br>
+        `Se actualizaron los embarques, canales finales, FOB y precios para <b>${fn(updatedUnits)} unidades</b> en <b>P24</b>.<br><br>
         <div class="p-3 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs">
           <b>Aviso de Reetiquetado:</b> Hay <b>${fn(priceChangedSkus.size)} códigos</b> (<b>${fn(priceChangedUnits)} unidades</b>) con cambio entre PVP Inicial y PVP Final.
         </div>`,
@@ -1025,7 +1045,7 @@ async function loadOcFinalProducto(file) {
         render();
       }
     } else {
-      modal('OC Final Aplicada', `Se actualizaron los embarques, canales finales y precios para ${fn(updatedUnits)} unidades en <b>P24</b>.`);
+      modal('OC Final Aplicada', `Se actualizaron los embarques, canales finales, FOB y precios para ${fn(updatedUnits)} unidades en <b>P24</b>.`);
     }
   } catch(e) {
     busy();
@@ -1039,7 +1059,7 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '5.0',
+      version: '5.1',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
@@ -1108,21 +1128,59 @@ async function importJsonBackup(file) {
     modal('Error al importar JSON', esc(e.message || e));
   }
 }
-/* ============ 6. EXPORTACIONES EXCEL ============ */
-function exportFullExcel() {
-  if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
+/* ============ 6. EXPORTACIONES EXCEL (COMPLETO 37 COLS + DISPONIBLES 10A LIMPIO) ============ */
+function exportExcelWithCols(rowsToExport, cols, sheetName, fileName) {
   busy('Generando archivo Excel…');
   setTimeout(() => {
-    const aoa = [MASTER_COLS];
-    S.rows.forEach(r => {
-      aoa.push(MASTER_COLS.map(c => r[c] ?? ''));
+    const aoa = [cols];
+    rowsToExport.forEach(r => {
+      aoa.push(cols.map(c => r[c] ?? ''));
     });
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
-    XLSX.writeFile(wb, `SITUACION_SEGUIMIENTOS_${S.brand}_${S.season}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), sheetName);
+    XLSX.writeFile(wb, fileName);
     busy();
   }, 50);
 }
+
+async function promptExcelExport() {
+  if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
+  const disp10A = S.rows.filter(r => st(r) === 'o');
+  const dispUnits = disp10A.reduce((a, r) => a + (Number(r['Cantidad']) || 0), 0);
+
+  await modal(
+    'Descargar reporte Excel',
+    `<p class="text-slate-600 mb-3">Selecciona el formato de descarga para <b>${S.brand} ${esc(S.season)}</b>:</p>
+     <div class="space-y-3">
+       <button id="btnExpFull" class="w-full text-left p-3.5 border rounded-lg hover:border-emerald-600 hover:bg-emerald-50/50 transition">
+         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="layers" class="w-4 h-4 text-emerald-700"></i> 1. Base Completa (${fn(S.rows.length)} filas · 37 columnas)</div>
+         <div class="text-xs text-slate-500 mt-1">Incluye todas las etapas (10A, P24, DROP) con columnas iniciales y finales (Canales Finales, PVP Final, Embarque, Factura).</div>
+       </button>
+       <button id="btnExp10A" class="w-full text-left p-3.5 border rounded-lg hover:border-amber-600 hover:bg-amber-50/50 transition ${!disp10A.length ? 'opacity-50 pointer-events-none' : ''}">
+         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="package-check" class="w-4 h-4 text-amber-600"></i> 2. Solo Disponibles 10A para armar OC (${fn(disp10A.length)} filas · ${fn(dispUnits)} unid.)</div>
+         <div class="text-xs text-slate-500 mt-1">Exporta únicamente el saldo pendiente <b>10A</b> con las <b>columnas iniciales de compra</b> (sin PVP Final, P4 Final, PMY Final, Canal Final ni Factura).</div>
+       </button>
+     </div>`,
+    [['Cancelar', 'c']]
+  );
+  icons();
+}
+
+document.addEventListener('click', e => {
+  const bFull = e.target.closest('#btnExpFull');
+  const b10A = e.target.closest('#btnExp10A');
+  if (bFull) {
+    $('modal').classList.add('hidden');
+    exportExcelWithCols(S.rows, MASTER_COLS, 'Sheet1', `SITUACION_SEGUIMIENTOS_${S.brand}_${S.season}.xlsx`);
+  }
+  if (b10A) {
+    $('modal').classList.add('hidden');
+    const disp10A = S.rows.filter(r => st(r) === 'o');
+    if (!disp10A.length) return modal('Sin disponibles 10A', 'No quedan unidades disponibles en etapa 10A.');
+    exportExcelWithCols(disp10A, INITIAL_10A_COLS, 'DISPONIBLES_10A', `DISPONIBLES_10A_${S.brand}_${S.season}.xlsx`);
+  }
+});
+
 function exportDrops() {
   const d = S.rows.filter(r => st(r) === 'd');
   if (!d.length) return modal('Sin DROPS', 'No hay cancelaciones (DROP) en esta temporada.');
@@ -1243,7 +1301,7 @@ function renderMain() {
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
           <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn btn-warn" onclick="promptDeleteOcs()"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>Revertir / Borrar OC</button>
-          <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="exportFullExcel()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
+          <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="promptExcelExport()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
           <button class="btn !bg-indigo-700 !text-white !border-indigo-700" onclick="exportJsonBackup()"><i data-lucide="file-json" class="w-4 h-4"></i>Exportar JSON</button>
           <button class="btn !bg-indigo-50 !text-indigo-800 !border-indigo-300" onclick="$('fJsonImport').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar JSON</button>
           <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar compra total</button>
