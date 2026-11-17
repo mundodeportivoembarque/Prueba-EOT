@@ -299,15 +299,25 @@ async function handleLogoUpload(file) {
   reader.readAsDataURL(file);
 }
 /* ============ GESTIÓN DE PLANTILLA DE PRESENTACIÓN (MAESTRO DE PRODUCTO) ============ */
+function getTplData(key = sbKey()) {
+  const raw = S.templates[key];
+  if (!raw) return { headers: [], items: {} };
+  if (raw.items && Array.isArray(raw.headers)) return raw;
+  return {
+    headers: ['Código', 'Descripción', 'Grupo', 'Actividad', 'Género', 'Color', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY', 'Fecha de entrega', 'Fecha de venta'],
+    items: raw
+  };
+}
 function isRowLockedByEmbarque(r) {
   return Boolean(String(r['EMBARQUE'] || '').trim());
 }
 
 function applyTemplateToRow(r, tplCatalog) {
-  if (!tplCatalog || isRowLockedByEmbarque(r)) return false;
+  const itemsMap = tplCatalog && tplCatalog.items ? tplCatalog.items : tplCatalog;
+  if (!itemsMap || isRowLockedByEmbarque(r)) return false;
   const cod = norm(r['Código']);
   if (!cod) return false;
-  const item = tplCatalog[cod];
+  const item = itemsMap[cod];
   if (!item) return false;
 
   let changed = false;
@@ -348,7 +358,7 @@ function applyTemplateToRow(r, tplCatalog) {
 }
 
 async function promptPresentationTemplate() {
-  const currentCatalog = S.templates[sbKey()] || {};
+  const currentCatalog = getTplData(sbKey()).items;
   const skuCount = Object.keys(currentCatalog).length;
   const unlockedRows = S.rows.filter(r => !isRowLockedByEmbarque(r)).length;
   const lockedRows = S.rows.length - unlockedRows;
@@ -400,39 +410,45 @@ document.addEventListener('click', e => {
   }
 });
 
+function getTplRowArray(it, headers) {
+  if (Array.isArray(it.fullRow) && it.fullRow.length) return it.fullRow;
+  return [
+    it.codigo || '', it.descripcion || '', it.grupo || '', it.actividad || '', it.genero || '', it.color || '',
+    it.fob || 0, it.pvp || 0, it.pvpRetail || 0, it.p4 || 0, it.pmy || 0, it.fEntrega || '', it.fVenta || ''
+  ];
+}
+
 function exportPresentationTemplate() {
-  const catalog = S.templates[sbKey()] || {};
-  const items = Object.values(catalog);
-  if (!items.length) return modal('Sin plantilla', 'No hay datos en la plantilla de presentación actual.');
+  const { headers, items } = getTplData(sbKey());
+  const list = Object.values(items);
+  if (!list.length) return modal('Sin plantilla', 'No hay datos en la plantilla de presentación actual.');
   const aoa = [
-    ['Código', 'Descripción', 'Grupo', 'Actividad', 'Género', 'Color', 'FOB', 'PVP', 'PVP retail', 'P4', 'PMY', 'Fecha de entrega', 'Fecha de venta'],
-    ...items.map(it => [
-      it.codigo || '', it.descripcion || '', it.grupo || '', it.actividad || '', it.genero || '', it.color || '',
-      it.fob || 0, it.pvp || 0, it.pvpRetail || 0, it.p4 || 0, it.pmy || 0, it.fEntrega || '', it.fVenta || ''
-    ])
+    headers,
+    ...list.map(it => getTplRowArray(it, headers))
   ];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'PLANTILLA_PRESENTACION');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'CONSOLIDADO');
   XLSX.writeFile(wb, `PLANTILLA_PRESENTACION_${S.brand}_${S.season}.xlsx`);
 }
 
 function viewPresentationTemplate() {
-  const catalog = S.templates[sbKey()] || {};
-  const allItems = Object.values(catalog).sort((a, b) => String(a.codigo || '').localeCompare(String(b.codigo || '')));
+  const { headers, items } = getTplData(sbKey());
+  const allItems = Object.values(items).sort((a, b) => String(a.codigo || '').localeCompare(String(b.codigo || '')));
   if (!allItems.length) {
     return modal('Plantilla vacía', 'Aún no has cargado una Plantilla de Presentación en esta temporada.');
   }
 
+  const hasFullCols = Boolean(allItems[0] && Array.isArray(allItems[0].fullRow));
   const grupos = [...new Set(allItems.map(x => x.grupo).filter(Boolean))].sort();
   let tplPage = 1;
   const tplPageSize = 50;
 
   const m = $('modal');
-  m.innerHTML = `<div class="bg-white rounded-lg shadow-xl w-full max-w-6xl max-h-[92vh] flex flex-col p-6">
+  m.innerHTML = `<div class="bg-white rounded-lg shadow-xl w-full max-w-[96vw] max-h-[92vh] flex flex-col p-6">
     <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
       <div>
-        <h3 class="text-lg font-semibold text-slate-900">Catálogo de Plantilla de Presentación · ${S.brand} ${esc(S.season)}</h3>
-        <p class="text-xs text-slate-500">${fn(allItems.length)} SKUs registrados en el maestro local de esta temporada</p>
+        <h3 class="text-lg font-semibold text-slate-900">Plantilla de Presentación Completa · ${S.brand} ${esc(S.season)}</h3>
+        <p class="text-xs text-slate-500">${fn(allItems.length)} SKUs · ${fn(headers.length)} columnas cargadas desde el archivo de Producto</p>
       </div>
       <div class="flex items-center gap-2">
         <button type="button" id="btnExportTplXlsx" class="btn !bg-emerald-700 !text-white !border-emerald-700">
@@ -442,8 +458,12 @@ function viewPresentationTemplate() {
       </div>
     </div>
 
+    ${!hasFullCols ? `<div class="mb-3 p-2.5 rounded bg-amber-50 border border-amber-300 text-amber-900 text-xs">
+      <b>Nota:</b> Esta plantilla se cargó antes de activar la vista completa de 54 columnas. Si deseas ver todas las columnas originales de SAP/Producto aquí mismo, vuelve a subirla con <b>"Reemplazar Plantilla completa"</b>.
+    </div>` : ''}
+
     <div class="flex flex-wrap items-center gap-2 mb-3">
-      <input type="text" id="tplSearchInput" class="border rounded px-3 py-1.5 text-sm w-72 bg-white" placeholder="Buscar por Código, Descripción o Color..." autofocus>
+      <input type="text" id="tplSearchInput" class="border rounded px-3 py-1.5 text-sm w-80 bg-white" placeholder="Buscar por Código, Descripción, Campaña, Línea, Color..." autofocus>
       <select id="tplFilterGrupo" class="border rounded px-2.5 py-1.5 text-sm bg-white">
         <option value="">Todos los grupos</option>
         ${grupos.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
@@ -452,21 +472,10 @@ function viewPresentationTemplate() {
     </div>
 
     <div class="border rounded-lg overflow-auto flex-1">
-      <table class="w-full text-xs">
+      <table class="w-full text-xs border-collapse">
         <thead>
-          <tr class="text-left text-slate-600 bg-slate-50 border-b">
-            <th class="px-3 py-2 whitespace-nowrap">Código</th>
-            <th class="px-3 py-2">Descripción</th>
-            <th class="px-3 py-2">Grupo</th>
-            <th class="px-3 py-2">Act.</th>
-            <th class="px-3 py-2">Género</th>
-            <th class="px-3 py-2">Color</th>
-            <th class="px-3 py-2 text-right">FOB</th>
-            <th class="px-3 py-2 text-right">PVP</th>
-            <th class="px-3 py-2 text-right">P4</th>
-            <th class="px-3 py-2 text-right">PMY</th>
-            <th class="px-3 py-2 whitespace-nowrap">F. Entrega</th>
-            <th class="px-3 py-2 whitespace-nowrap">F. Venta</th>
+          <tr class="text-left text-slate-700 bg-slate-100 border-b">
+            ${headers.map((h, idx) => `<th class="px-2.5 py-2 whitespace-nowrap border-r border-slate-200/70 font-semibold ${idx === 0 ? 'sticky left-0 z-10 bg-slate-100 shadow-[1px_0_0_#cbd5e1]' : ''}">${esc(h)}</th>`).join('')}
           </tr>
         </thead>
         <tbody id="tplTableBody"></tbody>
@@ -490,7 +499,8 @@ function viewPresentationTemplate() {
     const filtered = allItems.filter(it => {
       if (grp && it.grupo !== grp) return false;
       if (q) {
-        const hay = `${it.codigo} ${it.descripcion} ${it.color} ${it.actividad} ${it.genero}`.toLowerCase();
+        const rowVals = getTplRowArray(it, headers);
+        const hay = rowVals.join(' ').toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -504,22 +514,17 @@ function viewPresentationTemplate() {
       ? `${fn(allItems.length)} SKUs en total`
       : `Mostrando ${fn(filtered.length)} de ${fn(allItems.length)} SKUs`;
 
-    $('tplTableBody').innerHTML = slice.map(it => `
-      <tr class="border-t hover:bg-violet-50/40">
-        <td class="px-3 py-1.5 font-bold text-slate-900 whitespace-nowrap">${esc(it.codigo)}</td>
-        <td class="px-3 py-1.5 max-w-[16rem] truncate" title="${esc(it.descripcion)}">${esc(it.descripcion || '-')}</td>
-        <td class="px-3 py-1.5">${esc(it.grupo || '-')}</td>
-        <td class="px-3 py-1.5">${esc(it.actividad || '-')}</td>
-        <td class="px-3 py-1.5">${esc(it.genero || '-')}</td>
-        <td class="px-3 py-1.5">${esc(it.color || '-')}</td>
-        <td class="px-3 py-1.5 num font-semibold text-slate-800">${Number(it.fob || 0).toFixed(2)}</td>
-        <td class="px-3 py-1.5 num font-semibold text-indigo-900">${Number(it.pvp || 0).toFixed(2)}</td>
-        <td class="px-3 py-1.5 num text-slate-600">${Number(it.p4 || 0).toFixed(2)}</td>
-        <td class="px-3 py-1.5 num text-slate-600">${Number(it.pmy || 0).toFixed(2)}</td>
-        <td class="px-3 py-1.5 whitespace-nowrap text-slate-600">${esc(it.fEntrega || '-')}</td>
-        <td class="px-3 py-1.5 whitespace-nowrap text-slate-600">${esc(it.fVenta || '-')}</td>
-      </tr>
-    `).join('') || '<tr><td colspan="12" class="p-8 text-center text-slate-400">No se encontraron SKUs que coincidan con la búsqueda.</td></tr>';
+    $('tplTableBody').innerHTML = slice.map(it => {
+      const cells = getTplRowArray(it, headers);
+      return `<tr class="border-t hover:bg-violet-50/40">
+        ${headers.map((_, idx) => {
+          const val = cells[idx];
+          const isNum = typeof val === 'number';
+          const disp = isNum ? (Number.isInteger(val) ? fn(val) : val.toFixed(2)) : esc(val ?? '');
+          return `<td class="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-100 ${isNum ? 'num' : ''} ${idx === 0 ? 'sticky left-0 bg-white font-bold text-slate-900 shadow-[1px_0_0_#e2e8f0]' : ''}">${disp}</td>`;
+        }).join('')}
+      </tr>`;
+    }).join('') || `<tr><td colspan="${headers.length}" class="p-8 text-center text-slate-400">No se encontraron SKUs que coincidan con la búsqueda.</td></tr>`;
 
     $('tplPageInfo').textContent = `Página ${tplPage} de ${totalPages}`;
     $('tplPrevBtn').disabled = tplPage <= 1;
@@ -559,7 +564,7 @@ async function loadPresentationTemplate(file) {
       throw new Error('No se encontró la fila de encabezados con "CODIGO" y "FOB/PVP/DETALLE" en la plantilla.');
     }
 
-    const rawHeaders = aoa[headerRowIdx];
+    const rawHeaders = aoa[headerRowIdx].map((h, idx) => String(h ?? '').trim() || `COL_${idx + 1}`);
     const colIdx = {};
     rawHeaders.forEach((h, idx) => {
       const nh = norm(h);
@@ -577,7 +582,12 @@ async function loadPresentationTemplate(file) {
       return '';
     };
 
-    const existingCatalog = tplUploadMode === 'merge' ? { ...(S.templates[sbKey()] || {}) } : {};
+    const prevEntry = S.templates[sbKey()];
+    const prevItems = prevEntry && prevEntry.items ? prevEntry.items : (prevEntry && !prevEntry.items ? prevEntry : {});
+    const existingCatalog = tplUploadMode === 'merge' ? { ...prevItems } : {};
+    const finalHeaders = (tplUploadMode === 'merge' && prevEntry && Array.isArray(prevEntry.headers) && prevEntry.headers.length >= rawHeaders.length)
+      ? prevEntry.headers
+      : rawHeaders;
     let parsedSkus = 0;
 
     for (let i = headerRowIdx + 1; i < aoa.length; i++) {
@@ -588,6 +598,13 @@ async function loadPresentationTemplate(file) {
 
       const colorRaw = String(getCell(rowArr, ['COLOR PRINCIPAL', 'Color'])).trim();
       const colorClean = (colorRaw && colorRaw !== '-' && !norm(colorRaw).includes('faltacolor')) ? colorRaw : '';
+
+      const fullRow = finalHeaders.map((hName, hIdx) => {
+        const origIdx = rawHeaders.indexOf(hName);
+        const val = origIdx !== -1 ? rowArr[origIdx] : rowArr[hIdx];
+        if (val instanceof Date && !isNaN(val)) return fdate(val);
+        return val == null ? '' : val;
+      });
 
       existingCatalog[cod] = {
         codigo: codRaw,
@@ -602,7 +619,8 @@ async function loadPresentationTemplate(file) {
         p4: Number(String(getCell(rowArr, ['P4']) || 0).replace(',', '.')) || 0,
         pmy: Number(String(getCell(rowArr, ['PMY']) || 0).replace(',', '.')) || 0,
         fEntrega: fdate(getCell(rowArr, ['FECHA DE ENTREGA', 'Fecha de entrega'])),
-        fVenta: fdate(getCell(rowArr, ['FECHA DE VENTA', 'Fecha de venta']))
+        fVenta: fdate(getCell(rowArr, ['FECHA DE VENTA', 'Fecha de venta'])),
+        fullRow
       };
       parsedSkus++;
     }
@@ -611,7 +629,7 @@ async function loadPresentationTemplate(file) {
       throw new Error('No se encontraron filas con códigos válidos debajo de los encabezados.');
     }
 
-    S.templates[sbKey()] = existingCatalog;
+    S.templates[sbKey()] = { headers: finalHeaders, items: existingCatalog };
     await saveMeta();
 
     // Aplicar inmediatamente solo a las filas existentes que NO tienen EMBARQUE asignado
@@ -1677,7 +1695,7 @@ function renderMain() {
           <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button class="btn !bg-violet-50 !text-violet-900 !border-violet-300 hover:!bg-violet-100" onclick="promptPresentationTemplate()" title="Cargar o actualizar el maestro de Plantilla de Presentación de Producto"><i data-lucide="book-open-check" class="w-4 h-4"></i>Plantilla Presentación${Object.keys(S.templates[sbKey()] || {}).length ? ` <span class="ml-1 px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-violet-200 text-violet-900">${fn(Object.keys(S.templates[sbKey()] || {}).length)} SKUs</span>` : ''}</button>
+          <button class="btn !bg-violet-50 !text-violet-900 !border-violet-300 hover:!bg-violet-100" onclick="promptPresentationTemplate()" title="Cargar o actualizar el maestro de Plantilla de Presentación de Producto"><i data-lucide="book-open-check" class="w-4 h-4"></i>Plantilla Presentación${Object.keys(getTplData(sbKey()).items).length ? ` <span class="ml-1 px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-violet-200 text-violet-900">${fn(Object.keys(getTplData(sbKey()).items).length)} SKUs</span>` : ''}</button>
           <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
           <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
