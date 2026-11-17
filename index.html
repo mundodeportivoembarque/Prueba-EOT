@@ -48,6 +48,7 @@
 <input type="file" id="fBuyExtra" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fOcPrelim" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fOcFinal" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fOcDirect" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fJsonImport" accept=".json" class="hidden">
 <input type="file" id="fBrandLogo" accept="image/*" class="hidden">
 <input type="file" id="fPresTemplate" accept=".xlsx,.xls,.csv" class="hidden">
@@ -1534,6 +1535,10 @@ async function promptOcType() {
          <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="check-circle" class="w-4 h-4 text-emerald-600"></i> 2. OC Final de Producto (Actualizar P24)</div>
          <div class="text-xs text-slate-500 mt-1">Archivo devuelto por Producto. No toca el saldo 10A; inyecta Embarque, Canales Finales, FOB Marca (reemplaza FOB inicial) y Precios confirmados sobre las líneas en P24.</div>
        </button>
+       <button id="btnChooseDirectFinal" class="w-full text-left p-3.5 border rounded-lg hover:border-violet-600 hover:bg-violet-50/50 transition">
+         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="zap" class="w-4 h-4 text-violet-600"></i> 3. OC Directa Completa (10A → P24 + Canales y Precios Finales)</div>
+         <div class="text-xs text-slate-500 mt-1">Usa esta opción cuando la OC sigue en <b>10A</b> y quieres subir directamente el archivo final de Producto en un solo paso (baja a P24 e inyecta Canales Finales, FOB Marca y Precios Finales).</div>
+       </button>
      </div>`,
     [['Cancelar', 'c']]
   );
@@ -1544,6 +1549,7 @@ document.addEventListener('click', e => {
   const bFinal = e.target.closest('#btnChooseFinal');
   if (bPrelim) { $('modal').classList.add('hidden'); $('fOcPrelim').click(); }
   if (bFinal) { $('modal').classList.add('hidden'); $('fOcFinal').click(); }
+  if (e.target.closest('#btnChooseDirectFinal')) { $('modal').classList.add('hidden'); $('fOcDirect').click(); }
 });
 const getRowVal = (o, keys) => {
   for (const k of keys) {
@@ -1834,10 +1840,11 @@ async function loadOcFinalProducto(file) {
       const cIni = norm(normalizarCanal(cIniRaw));
       const cFinalRaw = getRowVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
       const cFinal = normalizarCanal(cFinalRaw);
-      const fobMarca = Number(String(getRowVal(o, ['FOB MARCA', 'FOB Marca', 'FOB_MARCA', 'FOB FINAL', 'FOB Final', 'FOB.1', 'FOB']) || 0).replace(',', '.')) || 0;
-      const pvpFin = Number(String(getRowVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
-      const p4Fin = Number(String(getRowVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
-      const pmyFin = Number(String(getRowVal(o, ['PMY.1', 'PMY FINAL', 'PMY Final', 'PMY']) || 0).replace(',', '.')) || 0;
+      const parsePrice = v => Number(String(v ?? '').replace(/[^0-9.,-]/g, '').replace(',', '.')) || 0;
+      const fobMarca = parsePrice(getRowVal(o, ['FOB MARCA', 'FOB Marca', 'FOB_MARCA', 'FOB FINAL', 'FOB Final', 'FOB.1']));
+      const pvpFin = parsePrice(getRowVal(o, ['PVP final', 'PVP FINAL', 'PVP Final', 'PVP.1', 'PVP_FINAL']));
+      const p4Fin = parsePrice(getRowVal(o, ['P4 final', 'P4 FINAL', 'P4 Final', 'P4.1', 'P4_FINAL']));
+      const pmyFin = parsePrice(getRowVal(o, ['PMY final', 'PMY FINAL', 'PMY Final', 'PMY.1', 'PMY_FINAL']));
       if (!cod || qty <= 0) continue;
       const rawPool = mergePools(
         (temp && cIni && tal) ? p24SeasonChanExact.get(`${temp}|${cod}|${col}|${tal}|${emb}|${fact}|${cIni}`) : null,
@@ -1984,6 +1991,12 @@ async function loadOcFinalProducto(file) {
     busy();
     modal('Error al aplicar OC final', esc(e.message || e));
   }
+}
+
+/* ============ 4C. CRUCE OC DIRECTA COMPLETA (10A -> P24 + FINAL EN UN SOLO PASO) ============ */
+async function loadOcDirectComplete(file) {
+  await loadOcPreliminar(file);
+  await loadOcFinalProducto(file);
 }
 /* ============ 5. EXPORTAR / IMPORTAR RESPALDO JSON COMPARTIBLE ============ */
 function exportJsonBackup() {
@@ -2631,6 +2644,7 @@ $('fBuyInit').onchange = e => { const f = e.target.files[0]; e.target.value = ''
 $('fBuyExtra').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadBuyExtra(f); };
 $('fOcPrelim').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcPreliminar(f); };
 $('fOcFinal').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcFinalProducto(f); };
+$('fOcDirect').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcDirectComplete(f); };
 $('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importJsonBackup(f); };
 $('fBrandLogo').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleLogoUpload(f); };
 $('fPresTemplate').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadPresentationTemplate(f); };
