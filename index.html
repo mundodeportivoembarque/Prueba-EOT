@@ -50,7 +50,7 @@
 <input type="file" id="fOcFinal" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fJsonImport" accept=".json" class="hidden">
 <input type="file" id="fBrandLogo" accept="image/*" class="hidden">
-<input type="file" id="fFobSync" accept=".xlsx,.xls,.csv" class="hidden">
+<input type="file" id="fPresTemplate" accept=".xlsx,.xls,.csv" class="hidden">
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
 <div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
   <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
@@ -115,6 +115,7 @@ const S = {
   tab: 'dash',
   seasons: { Adidas: ['FW26'], Reebok: ['FW26'] },
   logos: {},
+  templates: {},
   counts: {},
   f: { q: '', etapa: '', detalle: '', canal: '', canalFinal: '', embarque: '', quincena: '', precioCambio: '' },
   page: 1,
@@ -243,6 +244,7 @@ async function saveMeta() {
   t.objectStore('meta').put(S.seasons, 'seasons');
   t.objectStore('meta').put({ brand: S.brand, season: S.season }, 'active');
   t.objectStore('meta').put(S.logos, 'logos');
+  t.objectStore('meta').put(S.templates, 'templates');
   await txDone(t);
 }
 async function refreshCounts() {
@@ -296,6 +298,216 @@ async function handleLogoUpload(file) {
   };
   reader.readAsDataURL(file);
 }
+/* ============ GESTIÓN DE PLANTILLA DE PRESENTACIÓN (MAESTRO DE PRODUCTO) ============ */
+function isRowLockedByEmbarque(r) {
+  return Boolean(String(r['EMBARQUE'] || '').trim());
+}
+
+function applyTemplateToRow(r, tplCatalog) {
+  if (!tplCatalog || isRowLockedByEmbarque(r)) return false;
+  const cod = norm(r['Código']);
+  if (!cod) return false;
+  const item = tplCatalog[cod];
+  if (!item) return false;
+
+  let changed = false;
+  if (item.descripcion && r['Descripción'] !== item.descripcion) { r['Descripción'] = item.descripcion; changed = true; }
+  if (item.grupo && r['Grupo'] !== item.grupo) { r['Grupo'] = item.grupo; changed = true; }
+  if (item.actividad && r['Actividad'] !== item.actividad) { r['Actividad'] = item.actividad; changed = true; }
+  if (item.genero && r['Género'] !== item.genero) { r['Género'] = item.genero; changed = true; }
+  if (item.color && (!r['Color'] || norm(r['Color']) === 'faltacolor')) { r['Color'] = item.color; changed = true; }
+  if (item.fEntrega && r['Fecha de entrega'] !== item.fEntrega) { r['Fecha de entrega'] = item.fEntrega; changed = true; }
+  if (item.fVenta && r['Fecha de venta'] !== item.fVenta) { r['Fecha de venta'] = item.fVenta; changed = true; }
+
+  if (item.fob > 0 && Math.abs((Number(r['FOB']) || 0) - item.fob) > 0.0001) {
+    r['FOB'] = item.fob;
+    changed = true;
+  }
+  if (item.pvp > 0 && Math.abs((Number(r['PVP']) || 0) - item.pvp) > 0.001) {
+    r['PVP'] = item.pvp;
+    changed = true;
+  }
+  if (item.pvpRetail > 0 && Math.abs((Number(r['PVP retail']) || 0) - item.pvpRetail) > 0.001) {
+    r['PVP retail'] = item.pvpRetail;
+    changed = true;
+  }
+  if (item.p4 > 0 && Math.abs((Number(r['P4']) || 0) - item.p4) > 0.001) {
+    r['P4'] = item.p4;
+    changed = true;
+  }
+  if (item.pmy > 0 && Math.abs((Number(r['PMY']) || 0) - item.pmy) > 0.001) {
+    r['PMY'] = item.pmy;
+    changed = true;
+  }
+  const newVn = calcValorNeto(r);
+  if (Math.abs((Number(r['Valor Neto']) || 0) - newVn) > 0.0001) {
+    r['Valor Neto'] = newVn;
+    changed = true;
+  }
+  return changed;
+}
+
+async function promptPresentationTemplate() {
+  const currentCatalog = S.templates[sbKey()] || {};
+  const skuCount = Object.keys(currentCatalog).length;
+  const unlockedRows = S.rows.filter(r => !isRowLockedByEmbarque(r)).length;
+  const lockedRows = S.rows.length - unlockedRows;
+
+  await modal(
+    `Plantilla de Presentación · ${S.brand} ${esc(S.season)}`,
+    `<div class="space-y-3 text-slate-700">
+       <p>Conecta el archivo maestro enviado por <b>Producto</b> para estandarizar descripciones, grupos, fechas, <b>FOB</b> y precios iniciales (<b>PVP, P4, PMY</b>) por Código.</p>
+       <div class="p-3 rounded-lg bg-violet-50 border border-violet-200 text-xs space-y-1">
+         <div><b>Estado del catálogo en esta temporada:</b> ${skuCount > 0 ? `<span class="text-violet-900 font-bold">${fn(skuCount)} SKUs cargados</span>` : '<span class="text-slate-500">Sin plantilla cargada aún</span>'}</div>
+         <div><b>Protección de embarques:</b> Las filas que ya tienen <b>EMBARQUE</b> asignado (${fn(lockedRows)} líneas) <b>no se modificarán</b> para respetar sus precios históricos. Solo se actualizarán las ${fn(unlockedRows)} líneas sin embarque y las futuras compras/extras.</div>
+       </div>
+       <div class="space-y-2 pt-1">
+         <button id="btnTplMerge" class="w-full text-left p-3 border rounded-lg hover:border-violet-600 hover:bg-violet-50/50 transition">
+           <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="refresh-cw" class="w-4 h-4 text-violet-700"></i> ${skuCount > 0 ? 'Actualizar / Anexar SKUs a la Plantilla (Recomendado para Compras Extra)' : 'Cargar Plantilla de Presentación'}</div>
+           <div class="text-xs text-slate-500 mt-0.5">Agrega nuevos códigos (ej. de una compra extra) o actualiza los existentes en el catálogo maestro y sincroniza las líneas sin embarque.</div>
+         </button>
+         ${skuCount > 0 ? `
+         <button id="btnTplReplace" class="w-full text-left p-3 border rounded-lg hover:border-amber-600 hover:bg-amber-50/50 transition">
+           <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="file-spreadsheet" class="w-4 h-4 text-amber-600"></i> Reemplazar Plantilla completa</div>
+           <div class="text-xs text-slate-500 mt-0.5">Sustituye todo el catálogo de presentación por el nuevo archivo Excel y sincroniza las líneas sin embarque.</div>
+         </button>` : ''}
+       </div>
+     </div>`,
+    [['Cerrar', 'c']]
+  );
+  icons();
+}
+
+let tplUploadMode = 'merge';
+document.addEventListener('click', e => {
+  if (e.target.closest('#btnTplMerge')) {
+    tplUploadMode = 'merge';
+    $('modal').classList.add('hidden');
+    $('fPresTemplate').click();
+  }
+  if (e.target.closest('#btnTplReplace')) {
+    tplUploadMode = 'replace';
+    $('modal').classList.add('hidden');
+    $('fPresTemplate').click();
+  }
+});
+
+async function loadPresentationTemplate(file) {
+  try {
+    busy('Analizando Plantilla de Presentación…');
+    await tick();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+    // Buscar la hoja CONSOLIDADO o la primera hoja
+    const targetSheetName = wb.SheetNames.find(n => norm(n).includes('consolidado')) || wb.SheetNames[0];
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[targetSheetName], { header: 1, defval: '', raw: true });
+    if (!aoa.length) throw new Error('La hoja de la plantilla está vacía.');
+
+    // Detectar dinámicamente la fila de encabezados real (donde aparece CODIGO y FOB/PVP/DETALLE)
+    let headerRowIdx = -1;
+    for (let i = 0; i < Math.min(15, aoa.length); i++) {
+      const rowNorm = aoa[i].map(c => norm(c));
+      if (rowNorm.includes('codigo') && (rowNorm.includes('fob') || rowNorm.includes('pvp') || rowNorm.includes('detalle'))) {
+        headerRowIdx = i;
+        break;
+      }
+    }
+    if (headerRowIdx === -1) {
+      throw new Error('No se encontró la fila de encabezados con "CODIGO" y "FOB/PVP/DETALLE" en la plantilla.');
+    }
+
+    const rawHeaders = aoa[headerRowIdx];
+    const colIdx = {};
+    rawHeaders.forEach((h, idx) => {
+      const nh = norm(h);
+      if (!nh) return;
+      if (colIdx[nh] === undefined) colIdx[nh] = idx;
+    });
+
+    const getCell = (rowArr, aliases) => {
+      for (const a of aliases) {
+        const idx = colIdx[norm(a)];
+        if (idx !== undefined && rowArr[idx] !== undefined && rowArr[idx] !== '') {
+          return rowArr[idx];
+        }
+      }
+      return '';
+    };
+
+    const existingCatalog = tplUploadMode === 'merge' ? { ...(S.templates[sbKey()] || {}) } : {};
+    let parsedSkus = 0;
+
+    for (let i = headerRowIdx + 1; i < aoa.length; i++) {
+      const rowArr = aoa[i];
+      const codRaw = String(getCell(rowArr, ['CODIGO', 'Código', 'SAP'])).trim();
+      const cod = norm(codRaw);
+      if (!cod || cod === 'origen') continue;
+
+      const colorRaw = String(getCell(rowArr, ['COLOR PRINCIPAL', 'Color'])).trim();
+      const colorClean = (colorRaw && colorRaw !== '-' && !norm(colorRaw).includes('faltacolor')) ? colorRaw : '';
+
+      existingCatalog[cod] = {
+        codigo: codRaw,
+        descripcion: String(getCell(rowArr, ['DETALLE', 'Descripción', 'DESCRIPCION'])).trim(),
+        grupo: String(getCell(rowArr, ['GRUPO', 'Grupo'])).trim(),
+        actividad: String(getCell(rowArr, ['ACTIVIDAD', 'Actividad'])).trim(),
+        genero: String(getCell(rowArr, ['GENERO', 'Género'])).trim(),
+        color: colorClean,
+        fob: Number(String(getCell(rowArr, ['FOB']) || 0).replace(',', '.')) || 0,
+        pvp: Number(String(getCell(rowArr, ['PVP']) || 0).replace(',', '.')) || 0,
+        pvpRetail: Number(String(getCell(rowArr, ['PVP RETAIL', 'PVP retail']) || 0).replace(',', '.')) || 0,
+        p4: Number(String(getCell(rowArr, ['P4']) || 0).replace(',', '.')) || 0,
+        pmy: Number(String(getCell(rowArr, ['PMY']) || 0).replace(',', '.')) || 0,
+        fEntrega: fdate(getCell(rowArr, ['FECHA DE ENTREGA', 'Fecha de entrega'])),
+        fVenta: fdate(getCell(rowArr, ['FECHA DE VENTA', 'Fecha de venta']))
+      };
+      parsedSkus++;
+    }
+
+    if (!parsedSkus) {
+      throw new Error('No se encontraron filas con códigos válidos debajo de los encabezados.');
+    }
+
+    S.templates[sbKey()] = existingCatalog;
+    await saveMeta();
+
+    // Aplicar inmediatamente solo a las filas existentes que NO tienen EMBARQUE asignado
+    const modifiedRows = [];
+    let skippedLocked = 0;
+    for (const r of S.rows) {
+      if (isRowLockedByEmbarque(r)) {
+        skippedLocked++;
+        continue;
+      }
+      if (applyTemplateToRow(r, existingCatalog)) {
+        modifiedRows.push(r);
+      }
+    }
+
+    if (modifiedRows.length) {
+      busy('Sincronizando registros sin embarque…');
+      await tick();
+      await dbPut(modifiedRows);
+    }
+
+    await reload();
+    busy();
+
+    modal(
+      'Plantilla de Presentación Sincronizada',
+      `<div class="space-y-2">
+         <p>Se procesaron <b>${fn(parsedSkus)} SKUs</b> en el catálogo maestro de <b>${S.brand} ${esc(S.season)}</b> (Total catálogo: <b>${fn(Object.keys(existingCatalog).length)} SKUs</b>).</p>
+         <div class="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs space-y-1">
+           <div>✓ <b>${fn(modifiedRows.length)} líneas</b> sin embarque fueron actualizadas (descripción, FOB, precios iniciales y fechas).</div>
+           <div>🔒 <b>${fn(skippedLocked)} líneas</b> que ya tienen <b>EMBARQUE</b> asignado se mantuvieron intactas sin alterar sus precios.</div>
+         </div>
+         <p class="text-xs text-slate-500">Cualquier compra inicial o compra extra que cargues a partir de ahora tomará automáticamente la información de esta plantilla.</p>
+       </div>`
+    );
+  } catch(e) {
+    busy();
+    modal('Error al procesar Plantilla de Presentación', esc(e.message || e));
+  }
+}
 /* ============ PARSER DE EXCEL (COMPRA INICIAL / EXTRA) ============ */
 async function parseExcelFile(file, tipoCompra) {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
@@ -347,6 +559,10 @@ async function parseExcelFile(file, tipoCompra) {
     if (!r['PMY Final']) r['PMY Final'] = 0;
     if (!r['Etapa']) r['Etapa'] = E10;
     if (!r['Temporada']) r['Temporada'] = S.season;
+    const tplCatalog = S.templates[sbKey()];
+    if (tplCatalog) {
+      applyTemplateToRow(r, tplCatalog);
+    }
     r['Valor Neto'] = calcValorNeto(r);
     r.sb = sbKey();
     r.brand = S.brand;
@@ -392,6 +608,7 @@ async function loadBuyExtra(file) {
     busy('Leyendo compra extra…');
     await tick();
     const rows = await parseExcelFile(file, 'COMPRA EXTRA');
+    const tplCatalog = S.templates[sbKey()];
     rows.forEach(r => {
       r['Detalle compra'] = 'COMPRA EXTRA';
       r['Etapa'] = E10;
@@ -402,6 +619,7 @@ async function loadBuyExtra(file) {
       r['PVP Final'] = 0;
       r['P4 Final'] = 0;
       r['PMY Final'] = 0;
+      if (tplCatalog) applyTemplateToRow(r, tplCatalog);
       r['Valor Neto'] = calcValorNeto(r);
     });
     const extraFob = rows.reduce((a, r) => a + (r['Valor Neto'] || 0), 0);
@@ -1069,86 +1287,6 @@ async function loadOcFinalProducto(file) {
     modal('Error al aplicar OC final', esc(e.message || e));
   }
 }
-/* ============ 4C. ACTUALIZAR / INYECTAR FOB POR CÓDIGO SIN PERDER CRUCES P24 ============ */
-async function syncFobFromExcel(file) {
-  if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada para actualizarles el FOB.');
-  try {
-    busy('Leyendo precios FOB desde el Excel…');
-    await tick();
-    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-    const targetSheet = wb.Sheets['OC'] ? 'OC' : (wb.Sheets['Hoja1'] ? 'Hoja1' : wb.SheetNames[0]);
-    const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
-    if (!raw.length) throw new Error('El archivo Excel no contiene filas.');
-
-    const fobByExact = new Map();
-    const fobBySku = new Map();
-    let parsedCount = 0;
-
-    for (const o of raw) {
-      const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP', 'Artículo', 'Articulo']));
-      const col = norm(getRowVal(o, ['Color']));
-      const fobVal = Number(String(getRowVal(o, ['FOB MARCA', 'FOB Marca', 'FOB_MARCA', 'FOB FINAL', 'FOB Final', 'FOB.1', 'FOB', 'Costo FOB', 'Precio FOB', 'FOB Unitario']) || 0).replace(',', '.')) || 0;
-      if (cod && fobVal > 0) {
-        if (col) fobByExact.set(`${cod}|${col}`, fobVal);
-        fobBySku.set(cod, fobVal);
-        parsedCount++;
-      }
-    }
-
-    if (!fobBySku.size) {
-      throw new Error('No se encontraron columnas con "Código" y "FOB" (o "FOB MARCA") con valores mayores a 0 en el archivo.');
-    }
-
-    let matchedRows = 0;
-    let matchedUnits = 0;
-    let newTotalNeto = 0;
-    const toUpdate = [];
-
-    for (const r of S.rows) {
-      const cod = norm(r['Código']);
-      const col = norm(r['Color']);
-      const foundFob = (col && fobByExact.get(`${cod}|${col}`)) || fobBySku.get(cod);
-      if (foundFob && foundFob > 0) {
-        matchedRows++;
-        matchedUnits += Number(r['Cantidad'] || 0);
-        newTotalNeto += Math.round(foundFob * Number(r['Cantidad'] || 0) * 10000) / 10000;
-        toUpdate.push({ row: r, newFob: foundFob });
-      }
-    }
-
-    busy();
-    if (!toUpdate.length) {
-      return modal('Sin coincidencias', `Se leyeron ${fn(fobBySku.size)} códigos con FOB en el Excel, pero ninguno coincide con los códigos de <b>${S.brand} ${esc(S.season)}</b>.`);
-    }
-
-    const ch = await modal(
-      'Confirmar actualización masiva de FOB',
-      `<p>Se encontraron precios FOB para <b>${fn(matchedRows)} filas</b> (<b>${fn(matchedUnits)} unidades</b>) en <b>${S.brand} ${esc(S.season)}</b>.</p>
-       <div class="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-950 text-xs space-y-1">
-         <div><b>Nuevo Valor Neto proyectado:</b> ${fmoney(newTotalNeto)}</div>
-         <div>Tus etapas (<b>10A, P24, DROP</b>), facturas, embarques y canales finales permanecerán <b>100% intactos</b>.</div>
-       </div>`,
-      [['Cancelar', 'c'], ['Aplicar FOB y recalcular', 'ok', 1]]
-    );
-    if (ch !== 'ok') return;
-
-    busy('Actualizando FOB y Valor Neto en la base local…');
-    await tick();
-    const modifiedRows = [];
-    for (const item of toUpdate) {
-      item.row['FOB'] = item.newFob;
-      item.row['Valor Neto'] = calcValorNeto(item.row);
-      modifiedRows.push(item.row);
-    }
-    await dbPut(modifiedRows);
-    await reload();
-    busy();
-    modal('FOB Actualizado', `Se actualizó el <b>FOB</b> y se recalculó el <b>Valor Neto</b> (${fmoney(newTotalNeto)}) en <b>${fn(matchedRows)} registros</b> sin alterar tus cruces.`);
-  } catch(e) {
-    busy();
-    modal('Error al actualizar FOB', esc(e.message || e));
-  }
-}
 /* ============ 5. EXPORTAR / IMPORTAR RESPALDO JSON COMPARTIBLE ============ */
 function exportJsonBackup() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos en esta temporada para exportar.');
@@ -1395,9 +1533,9 @@ function renderMain() {
           <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          <button class="btn !bg-violet-50 !text-violet-900 !border-violet-300 hover:!bg-violet-100" onclick="promptPresentationTemplate()" title="Cargar o actualizar el maestro de Plantilla de Presentación de Producto"><i data-lucide="book-open-check" class="w-4 h-4"></i>Plantilla Presentación${Object.keys(S.templates[sbKey()] || {}).length ? ` <span class="ml-1 px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-violet-200 text-violet-900">${fn(Object.keys(S.templates[sbKey()] || {}).length)} SKUs</span>` : ''}</button>
           <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
-          <button class="btn !bg-sky-50 !text-sky-900 !border-sky-300 hover:!bg-sky-100" onclick="$('fFobSync').click()" title="Inyectar o actualizar FOB por Código desde Excel sin perder cruces P24"><i data-lucide="dollar-sign" class="w-4 h-4"></i>Actualizar FOB</button>
           <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn btn-warn" onclick="promptDeleteOcs()"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>Revertir / Borrar OC</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="promptExcelExport()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
@@ -1796,7 +1934,7 @@ $('fOcPrelim').onchange = e => { const f = e.target.files[0]; e.target.value = '
 $('fOcFinal').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcFinalProducto(f); };
 $('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importJsonBackup(f); };
 $('fBrandLogo').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleLogoUpload(f); };
-$('fFobSync').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) syncFobFromExcel(f); };
+$('fPresTemplate').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadPresentationTemplate(f); };
 (async () => {
   try {
     if (navigator.storage && navigator.storage.persist) {
@@ -1807,6 +1945,8 @@ $('fFobSync').onchange = e => { const f = e.target.files[0]; e.target.value = ''
     if (m) S.seasons = m;
     const savedLogos = await rq(db.transaction('meta').objectStore('meta').get('logos'));
     if (savedLogos) S.logos = savedLogos;
+    const savedTemplates = await rq(db.transaction('meta').objectStore('meta').get('templates'));
+    if (savedTemplates) S.templates = savedTemplates;
     const act = await rq(db.transaction('meta').objectStore('meta').get('active'));
     if (act && act.brand && act.season) {
       S.brand = act.brand;
