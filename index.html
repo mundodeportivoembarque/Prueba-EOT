@@ -253,13 +253,28 @@ async function refreshCounts() {
 }
 async function reload() {
   const rawRows = S.season ? await dbSeason(sbKey()) : [];
+  const migrated = [];
   rawRows.forEach(r => {
-    if (r['FOB'] === undefined) r['FOB'] = 0;
-    if (r['Valor Neto'] === undefined || (r['FOB'] > 0 && r['Cantidad'] > 0 && !r['Valor Neto'])) {
-      r['Valor Neto'] = calcValorNeto(r);
+    let dirty = false;
+    if (r['FOB'] === undefined) {
+      r['FOB'] = 0;
+      dirty = true;
     }
-    if (r['Detalle compra'] === undefined) r['Detalle compra'] = '';
+    const calcVn = calcValorNeto(r);
+    if (r['Valor Neto'] === undefined || (r['FOB'] > 0 && r['Cantidad'] > 0 && !r['Valor Neto'])) {
+      r['Valor Neto'] = calcVn;
+      dirty = true;
+    }
+    // Todo registro histórico que no tenga Detalle compra asignado se etiqueta automáticamente como COMPRA CANAL
+    if (!r['Detalle compra'] || !String(r['Detalle compra']).trim()) {
+      r['Detalle compra'] = 'COMPRA CANAL';
+      dirty = true;
+    }
+    if (dirty && r.id != null) migrated.push(r);
   });
+  if (migrated.length) {
+    await dbPut(migrated);
+  }
   S.rows = rawRows;
   await refreshCounts();
   render();
@@ -319,6 +334,8 @@ async function parseExcelFile(file, tipoCompra) {
     });
     if (tipoCompra) {
       r['Detalle compra'] = tipoCompra;
+    } else if (!r['Detalle compra']) {
+      r['Detalle compra'] = 'COMPRA CANAL';
     }
     if (!r['Canal Inicial']) {
       r['Canal Inicial'] = resolverCanalInicial(r['Referencia compra'], S.brand);
@@ -906,7 +923,6 @@ async function loadOcFinalProducto(file) {
       const cIni = norm(normalizarCanal(cIniRaw));
       const cFinalRaw = getRowVal(o, ['CANAL FINAL', 'CANAL FINAL ', 'CANAL_FINAL', 'Canal Final', 'CANAL']);
       const cFinal = normalizarCanal(cFinalRaw);
-      // Lectura de FOB MARCA (Opción A: reemplaza FOB inicial si viene con valor > 0)
       const fobMarca = Number(String(getRowVal(o, ['FOB MARCA', 'FOB Marca', 'FOB_MARCA', 'FOB FINAL', 'FOB Final', 'FOB.1', 'FOB']) || 0).replace(',', '.')) || 0;
       const pvpFin = Number(String(getRowVal(o, ['PVP.1', 'PVP FINAL', 'PVP Final', 'PVP']) || 0).replace(',', '.')) || 0;
       const p4Fin = Number(String(getRowVal(o, ['P4.1', 'P4 FINAL', 'P4 Final', 'P4']) || 0).replace(',', '.')) || 0;
@@ -1059,7 +1075,7 @@ function exportJsonBackup() {
   setTimeout(() => {
     const payload = {
       app: 'EOT_MEDEPORT',
-      version: '5.1',
+      version: '5.2',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
@@ -1116,7 +1132,7 @@ async function importJsonBackup(file) {
       const row = { ...r, sb: targetKey, brand: b, season: s };
       if (row['FOB'] === undefined) row['FOB'] = 0;
       row['Valor Neto'] = calcValorNeto(row);
-      if (row['Detalle compra'] === undefined) row['Detalle compra'] = '';
+      if (!row['Detalle compra'] || !String(row['Detalle compra']).trim()) row['Detalle compra'] = 'COMPRA CANAL';
       return row;
     });
     await dbAdd(cleanRows, 'Importando');
@@ -1347,7 +1363,7 @@ function vDash() {
 
     const det = String(r['Detalle compra'] || '').toUpperCase();
     if (det === 'COMPRA EXTRA') { extraUnits += q; extraFob += vn; }
-    else if (det === 'COMPRA CANAL') { canalUnits += q; canalFob += vn; }
+    else { canalUnits += q; canalFob += vn; }
 
     if (hasPriceChange(r)) {
       priceAlerts++;
@@ -1546,7 +1562,7 @@ function drawMx() {
             return `
             <tr class="r-${st(r)} border-t border-white/60">
               <td class="px-3 py-1.5">${esc(r['Seguimiento'])}</td>
-              <td class="px-3 py-1.5 whitespace-nowrap"><span class="text-[11px] font-semibold px-2 py-0.5 rounded border ${detBadge}">${esc(r['Detalle compra'] || '-')}</span></td>
+              <td class="px-3 py-1.5 whitespace-nowrap"><span class="text-[11px] font-semibold px-2 py-0.5 rounded border ${detBadge}">${esc(r['Detalle compra'] || 'COMPRA CANAL')}</span></td>
               <td class="px-3 py-1.5 font-medium">${esc(r['Código'])}</td>
               <td class="px-3 py-1.5 max-w-[14rem] truncate" title="${esc(r['Descripción'])}">${esc(r['Descripción'])}</td>
               <td class="px-3 py-1.5">${esc(r['Color'])}</td>
@@ -1628,7 +1644,7 @@ function vPrices() {
             const up = diff > 0;
             return `
             <tr class="border-t hover:bg-amber-50/40">
-              <td class="px-3 py-1.5 text-xs font-medium text-slate-600">${esc(r['Detalle compra'] || '-')}</td>
+              <td class="px-3 py-1.5 text-xs font-medium text-slate-600">${esc(r['Detalle compra'] || 'COMPRA CANAL')}</td>
               <td class="px-3 py-1.5 font-semibold text-slate-900">${esc(r['Código'])}</td>
               <td class="px-3 py-1.5 max-w-[14rem] truncate" title="${esc(r['Descripción'])}">${esc(r['Descripción'])}</td>
               <td class="px-3 py-1.5">${esc(r['Color'])}</td>
@@ -1672,7 +1688,7 @@ function vDrop() {
         <tbody>
           ${d.map(r => `
             <tr class="border-t">
-              <td class="px-3 py-1.5 text-xs">${esc(r['Detalle compra'] || '-')}</td>
+              <td class="px-3 py-1.5 text-xs">${esc(r['Detalle compra'] || 'COMPRA CANAL')}</td>
               <td class="px-3 py-1.5 font-medium">${esc(r['Código'])}</td>
               <td class="px-3 py-1.5">${esc(r['Descripción'])}</td>
               <td class="px-3 py-1.5">${esc(r['Color'])}</td>
