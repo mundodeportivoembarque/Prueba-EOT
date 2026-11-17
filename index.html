@@ -37,9 +37,9 @@
       <div class="font-bold text-white text-sm leading-snug">Sistema de Tracking de Compra</div>
       <div class="text-xs text-slate-400 font-medium mt-0.5">Medeport</div>
     </div>
-    <div id="persistBadge" class="shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5" title="Base de Datos Local IndexedDB">
+    <button type="button" id="cloudStatusBtn" onclick="promptCloudSync()" class="shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5 hover:bg-emerald-900/60 transition cursor-pointer" title="Base Local · Haz clic para vincular carpeta OneDrive / SharePoint">
       <span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local
-    </div>
+    </button>
   </div>
   <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
 </aside>
@@ -117,6 +117,14 @@ const S = {
   logos: {},
   templates: {},
   counts: {},
+  cloud: {
+    dirHandle: null,
+    dirName: '',
+    connected: false,
+    autoSync: true,
+    lastSync: '',
+    filesStatus: {}
+  },
   f: { q: '', etapa: '', detalle: '', canal: '', canalFinal: '', embarque: '', quincena: '', precioCambio: '' },
   page: 1,
   size: 50
@@ -186,11 +194,19 @@ const rq = r => new Promise((ok, ko) => { r.onsuccess = () => ok(r.result); r.on
 const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.onabort = () => ko(t.error); });
 function openDB() {
   return new Promise((ok, ko) => {
-    const r = indexedDB.open('eot-db-local-v4', 1);
+    const r = indexedDB.open('eot-db-local-v4', 2);
     r.onupgradeneeded = () => {
-      const s = r.result.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
-      s.createIndex('sb', 'sb');
-      r.result.createObjectStore('meta');
+      const d = r.result;
+      if (!d.objectStoreNames.contains('rows')) {
+        const s = d.createObjectStore('rows', { keyPath: 'id', autoIncrement: true });
+        s.createIndex('sb', 'sb');
+      }
+      if (!d.objectStoreNames.contains('meta')) {
+        d.createObjectStore('meta');
+      }
+      if (!d.objectStoreNames.contains('handles')) {
+        d.createObjectStore('handles');
+      }
     };
     r.onsuccess = () => ok(r.result);
     r.onerror = () => ko(r.error);
@@ -282,6 +298,498 @@ async function reload() {
   await refreshCounts();
   render();
 }
+/* ============ MOTOR DE SINCRONIZACIÓN ONEDRIVE / SHAREPOINT POR CARPETA (ARCHIVOS SEPARADOS) ============ */
+function updateCloudBadge() {
+  const b = $('cloudStatusBtn');
+  if (!b) return;
+  if (S.cloud.connected && S.cloud.dirHandle) {
+    b.className = 'shrink-0 flex items-center gap-1.5 text-[11px] text-sky-300 font-medium bg-sky-950/80 border border-sky-400/40 px-2 py-0.5 rounded-full mt-0.5 hover:bg-sky-900/70 transition cursor-pointer';
+    b.title = `Carpeta vinculada: ${S.cloud.dirName}${S.cloud.lastSync ? ' · Última sync: ' + S.cloud.lastSync : ''}`;
+    b.innerHTML = `<span class="w-2 h-2 rounded-full bg-sky-400"></span> OneDrive`;
+  } else if (S.cloud.dirHandle) {
+    b.className = 'shrink-0 flex items-center gap-1.5 text-[11px] text-amber-300 font-medium bg-amber-950/70 border border-amber-400/40 px-2 py-0.5 rounded-full mt-0.5 hover:bg-amber-900/70 transition cursor-pointer';
+    b.title = `Carpeta vinculada (${S.cloud.dirName}). Haz clic para reactivar permiso de lectura/escritura.`;
+    b.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> Reconectar`;
+  } else {
+    b.className = 'shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5 hover:bg-emerald-900/60 transition cursor-pointer';
+    b.title = 'Base Local · Haz clic para vincular carpeta OneDrive / SharePoint';
+    b.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local`;
+  }
+}
+
+const buyFileName = (b = S.brand, s = S.season) => `Compra_${b}_${s}.json.gz`;
+const tplFileName = (b = S.brand, s = S.season) => `Plantilla_${b}_${s}.json.gz`;
+const cfgFileName = () => `_config_sistema.json`;
+
+async function saveCloudDirHandle(dirHandle, autoSync = true) {
+  S.cloud.dirHandle = dirHandle;
+  S.cloud.dirName = dirHandle ? dirHandle.name : '';
+  S.cloud.autoSync = autoSync;
+  const t = db.transaction('handles', 'readwrite');
+  if (dirHandle) {
+    t.objectStore('handles').put({
+      dirHandle,
+      autoSync,
+      lastSync: S.cloud.lastSync,
+      filesStatus: S.cloud.filesStatus
+    }, 'cloudFolder');
+  } else {
+    t.objectStore('handles').delete('cloudFolder');
+  }
+  await txDone(t);
+  updateCloudBadge();
+}
+
+async function loadSavedCloudHandle() {
+  try {
+    const rec = await rq(db.transaction('handles').objectStore('handles').get('cloudFolder'));
+    if (rec && rec.dirHandle) {
+      S.cloud.dirHandle = rec.dirHandle;
+      S.cloud.dirName = rec.dirHandle.name || 'Carpeta OneDrive';
+      S.cloud.autoSync = rec.autoSync !== false;
+      S.cloud.lastSync = rec.lastSync || '';
+      S.cloud.filesStatus = rec.filesStatus || {};
+      const perm = await rec.dirHandle.queryPermission({ mode: 'readwrite' });
+      S.cloud.connected = (perm === 'granted');
+    }
+  } catch (e) {}
+  updateCloudBadge();
+}
+
+async function ensureCloudPermission(requestIfNeeded = true) {
+  if (!S.cloud.dirHandle) return false;
+  let perm = await S.cloud.dirHandle.queryPermission({ mode: 'readwrite' });
+  if (perm !== 'granted' && requestIfNeeded) {
+    perm = await S.cloud.dirHandle.requestPermission({ mode: 'readwrite' });
+  }
+  S.cloud.connected = (perm === 'granted');
+  updateCloudBadge();
+  return S.cloud.connected;
+}
+
+async function compressJsonString(jsonStr) {
+  if (typeof CompressionStream !== 'undefined') {
+    const stream = new Blob([jsonStr]).stream().pipeThrough(new CompressionStream('gzip'));
+    return await new Response(stream).arrayBuffer();
+  }
+  return new TextEncoder().encode(jsonStr).buffer;
+}
+
+async function decompressToJsonString(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b && typeof DecompressionStream !== 'undefined') {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return await new Response(stream).text();
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function writeCloudFile(fileName, dataBufferOrStr) {
+  const fileHandle = await S.cloud.dirHandle.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(dataBufferOrStr);
+  await writable.close();
+}
+
+async function readCloudFile(fileName) {
+  const fileHandle = await S.cloud.dirHandle.getFileHandle(fileName, { create: false });
+  return await fileHandle.getFile();
+}
+
+// Guarda la configuración global (marcas, temporadas, logos)
+async function pushCloudConfig() {
+  if (!S.cloud.dirHandle) return;
+  const cfg = {
+    app: 'EOT_MEDEPORT_CONFIG',
+    version: '7.1',
+    updatedAt: new Date().toISOString(),
+    seasons: S.seasons,
+    logos: S.logos
+  };
+  await writeCloudFile(cfgFileName(), JSON.stringify(cfg));
+}
+
+// Guarda SOLO el archivo de Compra de la temporada indicada (ej. Compra_Adidas_FW26.json.gz)
+async function pushCloudBuySeason(brand = S.brand, season = S.season, silent = true) {
+  if (!S.cloud.dirHandle) return false;
+  const okPerm = await ensureCloudPermission(!silent);
+  if (!okPerm) return false;
+
+  try {
+    if (!silent) busy(`Guardando ${buyFileName(brand, season)} en OneDrive…`);
+    await tick();
+    const key = `${brand}|${season}`;
+    const seasonRows = (brand === S.brand && season === S.season) ? S.rows : await dbSeason(key);
+    const cleanRows = seasonRows.map(r => {
+      const o = { ...r };
+      delete o.id;
+      return o;
+    });
+    const payload = {
+      app: 'EOT_MEDEPORT_BUY',
+      version: '7.1',
+      brand,
+      season,
+      updatedAt: new Date().toISOString(),
+      rowCount: cleanRows.length,
+      rows: cleanRows
+    };
+    const buf = await compressJsonString(JSON.stringify(payload));
+    const fname = buyFileName(brand, season);
+    await writeCloudFile(fname, buf);
+    await pushCloudConfig();
+
+    const nowStr = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    S.cloud.lastSync = nowStr;
+    S.cloud.filesStatus[fname] = { rows: cleanRows.length, kb: Math.round(buf.byteLength / 1024), time: nowStr };
+    await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
+    if (!silent) busy();
+    return true;
+  } catch (e) {
+    if (!silent) {
+      busy();
+      modal('Error al guardar Compra en OneDrive', esc(e.message || e));
+    }
+    return false;
+  }
+}
+
+// Guarda SOLO el archivo de Plantilla de Presentación de la temporada indicada (ej. Plantilla_Adidas_FW26.json.gz)
+async function pushCloudTemplateSeason(brand = S.brand, season = S.season, silent = true) {
+  if (!S.cloud.dirHandle) return false;
+  const okPerm = await ensureCloudPermission(!silent);
+  if (!okPerm) return false;
+
+  try {
+    if (!silent) busy(`Guardando ${tplFileName(brand, season)} en OneDrive…`);
+    await tick();
+    const key = `${brand}|${season}`;
+    const tplObj = getTplData(key);
+    const skuCount = Object.keys(tplObj.items).length;
+    const payload = {
+      app: 'EOT_MEDEPORT_TEMPLATE',
+      version: '7.1',
+      brand,
+      season,
+      updatedAt: new Date().toISOString(),
+      skuCount,
+      template: tplObj
+    };
+    const buf = await compressJsonString(JSON.stringify(payload));
+    const fname = tplFileName(brand, season);
+    await writeCloudFile(fname, buf);
+    await pushCloudConfig();
+
+    const nowStr = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    S.cloud.lastSync = nowStr;
+    S.cloud.filesStatus[fname] = { skus: skuCount, kb: Math.round(buf.byteLength / 1024), time: nowStr };
+    await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
+    if (!silent) busy();
+    return true;
+  } catch (e) {
+    if (!silent) {
+      busy();
+      modal('Error al guardar Plantilla en OneDrive', esc(e.message || e));
+    }
+    return false;
+  }
+}
+
+// Sincroniza TODAS las marcas/temporadas hacia archivos separados en la carpeta OneDrive
+async function pushAllSeparatedToCloud(silent = false) {
+  if (!S.cloud.dirHandle) return false;
+  const okPerm = await ensureCloudPermission(!silent);
+  if (!okPerm) return false;
+
+  try {
+    if (!silent) busy('Exportando archivos separados por temporada a OneDrive…');
+    await tick();
+    await pushCloudConfig();
+
+    const savedFiles = [];
+    for (const b of Object.keys(S.seasons)) {
+      for (const s of S.seasons[b]) {
+        const key = `${b}|${s}`;
+        const seasonRows = await dbSeason(key);
+        if (seasonRows.length > 0) {
+          await pushCloudBuySeason(b, s, true);
+          savedFiles.push(`${buyFileName(b, s)} (${fn(seasonRows.length)} filas)`);
+        }
+        const tplObj = getTplData(key);
+        if (Object.keys(tplObj.items).length > 0) {
+          await pushCloudTemplateSeason(b, s, true);
+          savedFiles.push(`${tplFileName(b, s)} (${fn(Object.keys(tplObj.items).length)} SKUs)`);
+        }
+      }
+    }
+
+    if (!silent) {
+      busy();
+      modal(
+        'Carpeta OneDrive Sincronizada',
+        `<div class="space-y-2">
+           <p>Se guardaron los archivos independientes en la carpeta <b>${esc(S.cloud.dirName)}</b>:</p>
+           <div class="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-950 text-xs space-y-1 max-h-52 overflow-y-auto">
+             <div class="font-semibold">• ${cfgFileName()} (Marcas, temporadas y logos)</div>
+             ${savedFiles.map(f => `<div>• ${esc(f)}</div>`).join('') || '<div class="text-slate-500">Sin datos cargados aún.</div>'}
+           </div>
+         </div>`
+      );
+    }
+    return true;
+  } catch (e) {
+    if (!silent) {
+      busy();
+      modal('Error al sincronizar carpeta', esc(e.message || e));
+    }
+    return false;
+  }
+}
+
+// Lee y restaura archivos desde la carpeta OneDrive (permite cargar solo la temporada actual o toda la carpeta)
+async function pullFromCloudFolder(onlyActiveSeason = false) {
+  if (!S.cloud.dirHandle) return;
+  const okPerm = await ensureCloudPermission(true);
+  if (!okPerm) return;
+
+  try {
+    busy('Leyendo archivos de la carpeta OneDrive / SharePoint…');
+    await tick();
+
+    // 1. Leer configuración si existe
+    try {
+      const cfgFile = await readCloudFile(cfgFileName());
+      const cfgData = JSON.parse(await cfgFile.text());
+      if (cfgData.seasons) S.seasons = cfgData.seasons;
+      if (cfgData.logos) S.logos = cfgData.logos;
+      await saveMeta();
+    } catch (e) {}
+
+    // Listar archivos reales en la carpeta
+    const entries = [];
+    for await (const [name, handle] of S.cloud.dirHandle.entries()) {
+      if (handle.kind === 'file' && (name.startsWith('Compra_') || name.startsWith('Plantilla_')) && name.endsWith('.json.gz')) {
+        entries.push({ name, handle });
+      }
+    }
+
+    if (!entries.length) {
+      busy();
+      return modal(
+        'Carpeta sin archivos de tracking',
+        `No se encontraron archivos <code>Compra_...json.gz</code> ni <code>Plantilla_...json.gz</code> dentro de <b>${esc(S.cloud.dirName)}</b>.<br><br>
+        Si es la primera vez que vinculas esta carpeta, haz clic en <b>"Guardar toda la base en carpeta"</b>.`
+      );
+    }
+
+    const targetBuy = buyFileName(S.brand, S.season);
+    const targetTpl = tplFileName(S.brand, S.season);
+    const toLoad = onlyActiveSeason
+      ? entries.filter(e => e.name === targetBuy || e.name === targetTpl)
+      : entries;
+
+    if (!toLoad.length) {
+      busy();
+      return modal('Sin archivos para esta temporada', `No existen archivos guardados para <b>${S.brand} ${esc(S.season)}</b> en la carpeta.`);
+    }
+
+    let loadedBuyCount = 0;
+    let loadedTplCount = 0;
+
+    for (const item of toLoad) {
+      busy(`Descargando ${item.name}…`);
+      await tick();
+      const file = await item.handle.getFile();
+      const buf = await file.arrayBuffer();
+      const jsonStr = await decompressToJsonString(buf);
+      const data = JSON.parse(jsonStr);
+
+      if (item.name.startsWith('Compra_') && Array.isArray(data.rows)) {
+        const b = data.brand || S.brand;
+        const s = data.season || S.season;
+        if (!S.seasons[b]) S.seasons[b] = [];
+        if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
+        const key = `${b}|${s}`;
+        await dbDelSeason(key);
+        const cleanRows = data.rows.map(r => {
+          const row = { ...r, brand: b, season: s, sb: key };
+          if (row['FOB'] === undefined) row['FOB'] = 0;
+          row['Valor Neto'] = calcValorNeto(row);
+          if (!row['Detalle compra'] || !String(row['Detalle compra']).trim()) row['Detalle compra'] = 'COMPRA CANAL';
+          return row;
+        });
+        await dbAdd(cleanRows);
+        loadedBuyCount += cleanRows.length;
+        S.cloud.filesStatus[item.name] = { rows: cleanRows.length, kb: Math.round(buf.byteLength / 1024), time: new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' }) };
+      } else if (item.name.startsWith('Plantilla_') && data.template) {
+        const b = data.brand || S.brand;
+        const s = data.season || S.season;
+        if (!S.seasons[b]) S.seasons[b] = [];
+        if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
+        const key = `${b}|${s}`;
+        S.templates[key] = data.template;
+        loadedTplCount++;
+        S.cloud.filesStatus[item.name] = { skus: Object.keys(data.template.items || data.template).length, kb: Math.round(buf.byteLength / 1024), time: new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' }) };
+      }
+    }
+
+    await saveMeta();
+    S.cloud.lastSync = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
+    await reload();
+    busy();
+
+    modal(
+      'Sincronización desde OneDrive Completada',
+      `<div class="space-y-2">
+         <p>Se actualizaron los datos locales desde la carpeta <b>${esc(S.cloud.dirName)}</b>:</p>
+         <div class="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-xs space-y-1">
+           <div>• <b>Registros de compra cargados:</b> ${fn(loadedBuyCount)} filas</div>
+           <div>• <b>Plantillas de presentación cargadas:</b> ${fn(loadedTplCount)} archivo(s)</div>
+         </div>
+       </div>`
+    );
+  } catch (e) {
+    busy();
+    modal('Error al leer carpeta OneDrive', esc(e.message || e));
+  }
+}
+
+async function linkCloudFolder() {
+  if (!window.showDirectoryPicker) {
+    return modal('Navegador no compatible', 'Tu navegador no soporta selección de carpetas. Usa Google Chrome o Microsoft Edge actualizado.');
+  }
+  try {
+    const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    await saveCloudDirHandle(dirHandle, true);
+    S.cloud.connected = true;
+    updateCloudBadge();
+
+    // Revisar si la carpeta ya tiene archivos guardados previamente
+    let hasExistingFiles = false;
+    for await (const [name, handle] of dirHandle.entries()) {
+      if (handle.kind === 'file' && (name.startsWith('Compra_') || name.startsWith('Plantilla_'))) {
+        hasExistingFiles = true;
+        break;
+      }
+    }
+
+    if (hasExistingFiles) {
+      const choice = await modal(
+        `Carpeta vinculada: ${esc(dirHandle.name)}`,
+        `<p>Esta carpeta de OneDrive ya contiene archivos de <b>Compras</b> y/o <b>Plantillas</b> guardados previamente.</p>
+         <p class="text-xs text-slate-600 mt-1">¿Qué deseas hacer ahora?</p>`,
+        [['Guardar mis datos actuales en la carpeta', 'push'], ['Cargar datos desde la carpeta a mi navegador', 'pull', 1]]
+      );
+      if (choice === 'pull') {
+        await pullFromCloudFolder(false);
+      } else if (choice === 'push') {
+        await pushAllSeparatedToCloud(false);
+      }
+    } else {
+      await pushAllSeparatedToCloud(false);
+    }
+  } catch (e) {
+    if (e && e.name !== 'AbortError') {
+      modal('No se pudo vincular la carpeta', esc(e.message || e));
+    }
+  }
+}
+
+async function promptCloudSync() {
+  const hasDir = Boolean(S.cloud.dirHandle);
+  const isConn = S.cloud.connected;
+  const activeBuyFile = buyFileName(S.brand, S.season);
+  const activeTplFile = tplFileName(S.brand, S.season);
+
+  await modal(
+    'Carpeta Corporativa · OneDrive / SharePoint',
+    `<div class="space-y-3 text-slate-700">
+       <p class="text-xs text-slate-600">Vincula una carpeta de tu <b>OneDrive o SharePoint</b> de Medeport. El sistema guarda <b>archivos independientes y comprimidos (.json.gz)</b> separados por cada <b>Compra</b> y cada <b>Plantilla de Presentación</b> de cada marca y temporada.</p>
+
+       ${hasDir ? `
+       <div class="p-3 rounded-lg ${isConn ? 'bg-sky-50 border-sky-200 text-sky-950' : 'bg-amber-50 border-amber-300 text-amber-950'} border text-xs space-y-1.5">
+         <div class="flex items-center justify-between">
+           <span class="font-bold">Carpeta vinculada: 📁 ${esc(S.cloud.dirName)}</span>
+           <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isConn ? 'bg-sky-200 text-sky-900' : 'bg-amber-200 text-amber-900'}">${isConn ? 'CONECTADA' : 'PERMISO PENDIENTE'}</span>
+         </div>
+         <div class="text-[11px] text-slate-600">
+           Archivos de la temporada activa (<b>${S.brand} ${esc(S.season)}</b>):<br>
+           • <code>${esc(activeBuyFile)}</code><br>
+           • <code>${esc(activeTplFile)}</code>
+         </div>
+         ${S.cloud.lastSync ? `<div>Última sincronización: <b>${esc(S.cloud.lastSync)}</b></div>` : ''}
+         <label class="flex items-center gap-2 pt-1 cursor-pointer select-none">
+           <input type="checkbox" id="chkCloudAutoSync" class="w-3.5 h-3.5 accent-sky-700" ${S.cloud.autoSync ? 'checked' : ''}>
+           <span>Autoguardar cada archivo individual automáticamente al hacer cambios</span>
+         </label>
+       </div>
+
+       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+         <button id="btnCloudPushSeason" class="p-2.5 border rounded-lg text-left hover:border-sky-600 hover:bg-sky-50/50 transition">
+           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4 text-sky-700"></i> Subir solo ${S.brand} ${esc(S.season)}</div>
+           <div class="text-[11px] text-slate-500 mt-0.5">Actualiza solo la compra y plantilla de esta temporada.</div>
+         </button>
+         <button id="btnCloudPullSeason" class="p-2.5 border rounded-lg text-left hover:border-emerald-600 hover:bg-emerald-50/50 transition">
+           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="download-cloud" class="w-4 h-4 text-emerald-700"></i> Bajar solo ${S.brand} ${esc(S.season)}</div>
+           <div class="text-[11px] text-slate-500 mt-0.5">Trae solo los archivos de esta temporada desde OneDrive.</div>
+         </button>
+         <button id="btnCloudPushAll" class="p-2.5 border rounded-lg text-left hover:border-indigo-600 hover:bg-indigo-50/50 transition">
+           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="layers" class="w-4 h-4 text-indigo-700"></i> Guardar toda la base en carpeta</div>
+           <div class="text-[11px] text-slate-500 mt-0.5">Exporta todas las marcas y temporadas en archivos separados.</div>
+         </button>
+         <button id="btnCloudPullAll" class="p-2.5 border rounded-lg text-left hover:border-teal-600 hover:bg-teal-50/50 transition">
+           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="refresh-cw" class="w-4 h-4 text-teal-700"></i> Actualizar toda la carpeta</div>
+           <div class="text-[11px] text-slate-500 mt-0.5">Sincroniza todas las temporadas guardadas en OneDrive.</div>
+         </button>
+       </div>
+
+       <div class="border-t pt-2.5 flex flex-wrap gap-2 justify-between items-center text-xs">
+         <button id="btnCloudSelectFolder" class="text-indigo-700 font-semibold hover:underline">Cambiar carpeta de OneDrive</button>
+         <button id="btnCloudUnlink" class="text-red-600 hover:underline">Desvincular carpeta</button>
+       </div>
+       ` : `
+       <div class="pt-1">
+         <button id="btnCloudSelectFolder" class="w-full text-left p-4 border-2 border-dashed border-sky-300 rounded-lg hover:border-sky-600 hover:bg-sky-50/50 transition">
+           <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="folder-sync" class="w-5 h-5 text-sky-700"></i> Seleccionar Carpeta de OneDrive / SharePoint</div>
+           <div class="text-xs text-slate-500 mt-1">Elige la carpeta compartida de Medeport en tu PC. El sistema organizará automáticamente archivos independientes como <code>Compra_Adidas_FW26.json.gz</code> y <code>Plantilla_Adidas_FW26.json.gz</code>.</div>
+         </button>
+       </div>
+       `}
+     </div>`,
+    [['Cerrar', 'c']]
+  );
+  icons();
+}
+
+document.addEventListener('click', async e => {
+  if (e.target.closest('#btnCloudSelectFolder')) { $('modal').classList.add('hidden'); await linkCloudFolder(); }
+  if (e.target.closest('#btnCloudPushSeason')) {
+    $('modal').classList.add('hidden');
+    const ok1 = await pushCloudBuySeason(S.brand, S.season, false);
+    const ok2 = await pushCloudTemplateSeason(S.brand, S.season, false);
+    if (ok1 || ok2) modal('Temporada Sincronizada', `Se actualizaron <b>${esc(buyFileName())}</b> y <b>${esc(tplFileName())}</b> en OneDrive.`);
+  }
+  if (e.target.closest('#btnCloudPullSeason')) { $('modal').classList.add('hidden'); await pullFromCloudFolder(true); }
+  if (e.target.closest('#btnCloudPushAll')) { $('modal').classList.add('hidden'); await pushAllSeparatedToCloud(false); }
+  if (e.target.closest('#btnCloudPullAll')) { $('modal').classList.add('hidden'); await pullFromCloudFolder(false); }
+  if (e.target.closest('#btnCloudUnlink')) {
+    $('modal').classList.add('hidden');
+    S.cloud.connected = false;
+    await saveCloudDirHandle(null, false);
+    modal('Carpeta desvinculada', 'Se desvinculó la carpeta de OneDrive. Tus datos siguen guardados localmente en este navegador.');
+  }
+});
+
+document.addEventListener('change', async e => {
+  if (e.target && e.target.id === 'chkCloudAutoSync') {
+    S.cloud.autoSync = e.target.checked;
+    if (S.cloud.dirHandle) {
+      await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
+    }
+  }
+});
+
 /* ============ GESTIÓN DE LOGOS DE MARCA ============ */
 function triggerLogoUpload(brand) {
   logoTargetBrand = brand;
@@ -654,6 +1162,10 @@ async function loadPresentationTemplate(file) {
     await reload();
     busy();
 
+    if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      pushCloudTemplateSeason(S.brand, S.season, true);
+      if (modifiedRows.length) pushCloudBuySeason(S.brand, S.season, true);
+    }
     modal(
       'Plantilla de Presentación Sincronizada',
       `<div class="space-y-2">
@@ -758,6 +1270,9 @@ async function loadBuyInitial(file) {
     await saveMeta();
     await reload();
     busy();
+        if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      pushCloudBuySeason(S.brand, S.season, true);
+    }
     modal('Compra Inicial Cargada', `Se cargaron con éxito <b>${fn(rows.length)} filas</b> como <b>COMPRA CANAL</b> en <b>${S.brand} ${S.season}</b>.<br>Valor Neto total: <b>${fmoney(totalFob)}</b>.`);
   } catch(e) {
     busy();
@@ -798,6 +1313,9 @@ async function loadBuyExtra(file) {
     await dbAdd(rows, 'Guardando');
     await reload();
     busy();
+        if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      pushCloudBuySeason(S.brand, S.season, true);
+    }
     modal('Compra Extra Anexada', `Se añadieron <b>${fn(rows.length)} filas</b> como <b>COMPRA EXTRA</b> en estado 10A (Valor Neto: <b>${fmoney(extraFob)}</b>).`);
   } catch(e) {
     busy();
@@ -825,7 +1343,10 @@ async function clearSeasonData() {
   await dbDelSeason(sbKey());
   await reload();
   busy();
-  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
+      if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      pushCloudBuySeason(S.brand, S.season, true);
+    }
+    modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
 }
 /* ============ 3B. BORRAR / REVERTIR OCs ESPECÍFICAS CON FILTRO POR EMBARQUE ============ */
 async function promptDeleteOcs() {
@@ -994,7 +1515,10 @@ async function revertOcsByKeys(selectedKeys) {
   if (toDeleteIds.length) await dbDeleteIds(toDeleteIds);
   await reload();
   busy();
-  modal('OCs Revertidas', `Se devolvieron <b>${fn(revertedUnits)} unidades</b> a estado disponible <b>10A</b> y se recalcularon los valores netos.`);
+      if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      pushCloudBuySeason(S.brand, S.season, true);
+    }
+    modal('OCs Revertidas', `Se devolvieron <b>${fn(revertedUnits)} unidades</b> a estado disponible <b>10A</b> y se recalcularon los valores netos.`);
 }
 /* ============ 4. MODAL SELECTOR DE TIPO DE OC ============ */
 async function promptOcType() {
@@ -1182,6 +1706,12 @@ async function loadOcPreliminar(file) {
     if (added.length) await dbAdd(added);
     await reload();
     busy();
+        if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      const affectedSeasons = new Set([S.season, ...Object.keys(perSeasonUnits)]);
+      for (const sName of affectedSeasons) {
+        pushCloudBuySeason(S.brand, sName, true);
+      }
+    }
     modal('OC Preliminar Cargada', `Se pasaron ${fn(matchedUnits)} unidades a <b>P24</b>.`);
   } catch(e) {
     busy();
@@ -1427,6 +1957,12 @@ async function loadOcFinalProducto(file) {
     if (added.length) await dbAdd(added);
     await reload();
     busy();
+    if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
+      const affectedSeasons = new Set([S.season, ...Object.keys(perSeasonUnits)]);
+      for (const sName of affectedSeasons) {
+        pushCloudBuySeason(S.brand, sName, true);
+      }
+    }
     if (priceChangedSkus.size > 0) {
       const goAlert = await modal(
         'OC Final Aplicada · Acción Requerida',
@@ -1701,6 +2237,7 @@ function renderMain() {
           <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn btn-warn" onclick="promptDeleteOcs()"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>Revertir / Borrar OC</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="promptExcelExport()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
+          <button class="btn !bg-sky-700 !text-white !border-sky-700 hover:!bg-sky-800" onclick="promptCloudSync()" title="Sincronizar base completa con OneDrive / SharePoint"><i data-lucide="cloud" class="w-4 h-4"></i>OneDrive / Nube</button>
           <button class="btn !bg-indigo-700 !text-white !border-indigo-700" onclick="exportJsonBackup()"><i data-lucide="file-json" class="w-4 h-4"></i>Exportar JSON</button>
           <button class="btn !bg-indigo-50 !text-indigo-800 !border-indigo-300" onclick="$('fJsonImport').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar JSON</button>
           <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar compra total</button>
@@ -2114,7 +2651,9 @@ $('fPresTemplate').onchange = e => { const f = e.target.files[0]; e.target.value
       S.brand = act.brand;
       S.season = act.season;
     }
+    await loadSavedCloudHandle();
     await reload();
+    updateCloudBadge();
   } catch(e) {
     document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB: ' + esc(e.message) + '</p>';
   }
