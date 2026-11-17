@@ -50,6 +50,7 @@
 <input type="file" id="fOcFinal" accept=".xlsx,.xls,.csv" class="hidden">
 <input type="file" id="fJsonImport" accept=".json" class="hidden">
 <input type="file" id="fBrandLogo" accept="image/*" class="hidden">
+<input type="file" id="fFobSync" accept=".xlsx,.xls,.csv" class="hidden">
 <div id="modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"></div>
 <div id="busy" class="hidden fixed inset-0 bg-white/70 z-40 flex items-center justify-center text-sm font-medium">
   <span id="busyMsg" class="bg-white shadow px-4 py-2 rounded"></span>
@@ -1068,6 +1069,86 @@ async function loadOcFinalProducto(file) {
     modal('Error al aplicar OC final', esc(e.message || e));
   }
 }
+/* ============ 4C. ACTUALIZAR / INYECTAR FOB POR CÓDIGO SIN PERDER CRUCES P24 ============ */
+async function syncFobFromExcel(file) {
+  if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada para actualizarles el FOB.');
+  try {
+    busy('Leyendo precios FOB desde el Excel…');
+    await tick();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+    const targetSheet = wb.Sheets['OC'] ? 'OC' : (wb.Sheets['Hoja1'] ? 'Hoja1' : wb.SheetNames[0]);
+    const raw = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { defval: '', raw: true });
+    if (!raw.length) throw new Error('El archivo Excel no contiene filas.');
+
+    const fobByExact = new Map();
+    const fobBySku = new Map();
+    let parsedCount = 0;
+
+    for (const o of raw) {
+      const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP', 'Artículo', 'Articulo']));
+      const col = norm(getRowVal(o, ['Color']));
+      const fobVal = Number(String(getRowVal(o, ['FOB MARCA', 'FOB Marca', 'FOB_MARCA', 'FOB FINAL', 'FOB Final', 'FOB.1', 'FOB', 'Costo FOB', 'Precio FOB', 'FOB Unitario']) || 0).replace(',', '.')) || 0;
+      if (cod && fobVal > 0) {
+        if (col) fobByExact.set(`${cod}|${col}`, fobVal);
+        fobBySku.set(cod, fobVal);
+        parsedCount++;
+      }
+    }
+
+    if (!fobBySku.size) {
+      throw new Error('No se encontraron columnas con "Código" y "FOB" (o "FOB MARCA") con valores mayores a 0 en el archivo.');
+    }
+
+    let matchedRows = 0;
+    let matchedUnits = 0;
+    let newTotalNeto = 0;
+    const toUpdate = [];
+
+    for (const r of S.rows) {
+      const cod = norm(r['Código']);
+      const col = norm(r['Color']);
+      const foundFob = (col && fobByExact.get(`${cod}|${col}`)) || fobBySku.get(cod);
+      if (foundFob && foundFob > 0) {
+        matchedRows++;
+        matchedUnits += Number(r['Cantidad'] || 0);
+        newTotalNeto += Math.round(foundFob * Number(r['Cantidad'] || 0) * 10000) / 10000;
+        toUpdate.push({ row: r, newFob: foundFob });
+      }
+    }
+
+    busy();
+    if (!toUpdate.length) {
+      return modal('Sin coincidencias', `Se leyeron ${fn(fobBySku.size)} códigos con FOB en el Excel, pero ninguno coincide con los códigos de <b>${S.brand} ${esc(S.season)}</b>.`);
+    }
+
+    const ch = await modal(
+      'Confirmar actualización masiva de FOB',
+      `<p>Se encontraron precios FOB para <b>${fn(matchedRows)} filas</b> (<b>${fn(matchedUnits)} unidades</b>) en <b>${S.brand} ${esc(S.season)}</b>.</p>
+       <div class="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-950 text-xs space-y-1">
+         <div><b>Nuevo Valor Neto proyectado:</b> ${fmoney(newTotalNeto)}</div>
+         <div>Tus etapas (<b>10A, P24, DROP</b>), facturas, embarques y canales finales permanecerán <b>100% intactos</b>.</div>
+       </div>`,
+      [['Cancelar', 'c'], ['Aplicar FOB y recalcular', 'ok', 1]]
+    );
+    if (ch !== 'ok') return;
+
+    busy('Actualizando FOB y Valor Neto en la base local…');
+    await tick();
+    const modifiedRows = [];
+    for (const item of toUpdate) {
+      item.row['FOB'] = item.newFob;
+      item.row['Valor Neto'] = calcValorNeto(item.row);
+      modifiedRows.push(item.row);
+    }
+    await dbPut(modifiedRows);
+    await reload();
+    busy();
+    modal('FOB Actualizado', `Se actualizó el <b>FOB</b> y se recalculó el <b>Valor Neto</b> (${fmoney(newTotalNeto)}) en <b>${fn(matchedRows)} registros</b> sin alterar tus cruces.`);
+  } catch(e) {
+    busy();
+    modal('Error al actualizar FOB', esc(e.message || e));
+  }
+}
 /* ============ 5. EXPORTAR / IMPORTAR RESPALDO JSON COMPARTIBLE ============ */
 function exportJsonBackup() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos en esta temporada para exportar.');
@@ -1316,6 +1397,7 @@ function renderMain() {
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn" onclick="$('fBuyInit').click()"><i data-lucide="file-up" class="w-4 h-4"></i>Cargar compra inicial</button>
           <button class="btn" onclick="$('fBuyExtra').click()"><i data-lucide="plus-circle" class="w-4 h-4"></i>Cargar compra extra</button>
+          <button class="btn !bg-sky-50 !text-sky-900 !border-sky-300 hover:!bg-sky-100" onclick="$('fFobSync').click()" title="Inyectar o actualizar FOB por Código desde Excel sin perder cruces P24"><i data-lucide="dollar-sign" class="w-4 h-4"></i>Actualizar FOB</button>
           <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn btn-warn" onclick="promptDeleteOcs()"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>Revertir / Borrar OC</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="promptExcelExport()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
@@ -1714,6 +1796,7 @@ $('fOcPrelim').onchange = e => { const f = e.target.files[0]; e.target.value = '
 $('fOcFinal').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcFinalProducto(f); };
 $('fJsonImport').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importJsonBackup(f); };
 $('fBrandLogo').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleLogoUpload(f); };
+$('fFobSync').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) syncFobFromExcel(f); };
 (async () => {
   try {
     if (navigator.storage && navigator.storage.persist) {
