@@ -95,7 +95,7 @@ const MASTER_COLS = [
   'FOB', 'Valor Neto',
   'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final',
   'Etapa', 'Documento', 'EMBARQUE', 'Fecha estimada inicio',
-  'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura'
+  'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura', 'Fecha de ingreso embarque'
 ];
 // Columnas limpias de compra inicial (sin campos finales de Producto ni facturación) para armar OC inicial (10A)
 const INITIAL_10A_COLS = [
@@ -127,6 +127,7 @@ const S = {
     filesStatus: {}
   },
   f: { q: '', etapa: '', detalle: '', canal: '', canalFinal: '', embarque: '', quincena: '', precioCambio: '' },
+  corp: { year: '', scope: 'season', expandedMonth: null },
   page: 1,
   size: 50
 };
@@ -138,7 +139,12 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const fn = n => Number(n || 0).toLocaleString('es');
 const fmoney = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-const normTalla = t => String(t || '').trim().replace(',', '.').replace(/^0+/, '');
+const normTalla = t => {
+  if (t === null || t === undefined) return '';
+  const s = String(t).trim().replace(',', '.');
+  if (!s) return '';
+  return /^0+(\.0+)?$/.test(s) ? '0' : s.replace(/^0+(?=\d)/, '');
+};
 const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Etapa'] || '').startsWith('DROP') ? 'd' : 'o';
 const sbKey = () => S.brand + '|' + S.season;
 const busy = m => { $('busyMsg').textContent = m || ''; $('busy').classList.toggle('hidden', !m); };
@@ -157,9 +163,21 @@ function hasPriceChange(r) {
 }
 
 function fdate(v) {
-  if (!v) return '';
-  if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
-  return String(v).trim();
+  if (!v && v !== 0) return '';
+  if (v instanceof Date && !isNaN(v)) {
+    return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
+  }
+  if (typeof v === 'number' && v > 20000 && v < 80000) {
+    const dt = new Date(Math.round((v - 25569) * 86400 * 1000));
+    if (!isNaN(dt)) return dt.getUTCFullYear() + '-' + String(dt.getUTCMonth() + 1).padStart(2, '0') + '-' + String(dt.getUTCDate()).padStart(2, '0');
+  }
+  const s = String(v).trim();
+  if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)) {
+    const [d, m, yRaw] = s.split('/');
+    const y = yRaw.length === 2 ? '20' + yRaw : yRaw;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  return s;
 }
 function getQuincena(fechaStr) {
   const s = String(fechaStr || '').trim();
@@ -1313,6 +1331,7 @@ async function loadBuyExtra(file) {
       r['Factura'] = '';
       r['Fecha de factura'] = '';
       r['EMBARQUE'] = '';
+      r['Fecha de ingreso embarque'] = '';
       r['Canal Final'] = '';
       r['PVP Final'] = 0;
       r['P4 Final'] = 0;
@@ -1523,6 +1542,7 @@ async function revertOcsByKeys(selectedKeys) {
       r['Factura'] = '';
       r['Fecha de factura'] = '';
       r['EMBARQUE'] = '';
+      r['Fecha de ingreso embarque'] = '';
       r['Canal Final'] = '';
       r['PVP Final'] = 0;
       r['P4 Final'] = 0;
@@ -1656,6 +1676,8 @@ async function loadOcPreliminar(file) {
       const fact = String(getRowVal(o, ['Factura', 'No FACTURA', 'No FACTURA '])).trim();
       const embFinal = String(getRowVal(o, ['EMBARQUE', 'Embarque', 'Nº de embarque', 'EMBARQUES'])).trim();
       const fFact = fdate(getRowVal(o, ['Fecha de factura']));
+      const fIngEmb = fdate(getRowVal(o, ['Fecha de ingreso embarque', 'Fecha ingreso embarque', 'FECHA DE INGRESO EMBARQUE', 'FECHA INGRESO EMBARQUE', 'Fecha Ingreso', 'Fecha estimada ingreso', 'Fecha Arribo']));
+      const fIngEmb = fdate(getRowVal(o, ['Fecha de ingreso embarque', 'Fecha ingreso embarque', 'FECHA DE INGRESO EMBARQUE', 'FECHA INGRESO EMBARQUE', 'Fecha Ingreso', 'Fecha estimada ingreso', 'Fecha Arribo']));
       const refFinal = String(getRowVal(o, ['Referencia compra', 'CANAL'])).trim();
       if (!cod || qty <= 0) continue;
       const pool = mergePools(
@@ -1687,6 +1709,7 @@ async function loadOcPreliminar(file) {
           baseRow['Etapa'] = EP;
           if (fact) baseRow['Factura'] = fact;
           if (fFact) baseRow['Fecha de factura'] = fFact;
+          if (fIngEmb) baseRow['Fecha de ingreso embarque'] = fIngEmb;
           if (embFinal) baseRow['EMBARQUE'] = embFinal;
           if (refFinal && !baseRow['Referencia compra']) baseRow['Referencia compra'] = refFinal;
           baseRow['Valor Neto'] = calcValorNeto(baseRow);
@@ -1698,6 +1721,7 @@ async function loadOcPreliminar(file) {
           facturada['Etapa'] = EP;
           if (fact) facturada['Factura'] = fact;
           if (fFact) facturada['Fecha de factura'] = fFact;
+          if (fIngEmb) facturada['Fecha de ingreso embarque'] = fIngEmb;
           if (embFinal) facturada['EMBARQUE'] = embFinal;
           if (refFinal && !facturada['Referencia compra']) facturada['Referencia compra'] = refFinal;
           facturada['Valor Neto'] = calcValorNeto(facturada);
@@ -1907,6 +1931,7 @@ async function loadOcFinalProducto(file) {
           perSeasonUnits[rowSeason] = (perSeasonUnits[rowSeason] || 0) + take;
           if (embRaw) baseRow['EMBARQUE'] = embRaw;
           if (fFact && !baseRow['Fecha de factura']) baseRow['Fecha de factura'] = fFact;
+          if (fIngEmb) baseRow['Fecha de ingreso embarque'] = fIngEmb;
           if (cFinal) baseRow['Canal Final'] = cFinal;
           if (fobMarca > 0) {
             if (Math.abs((Number(baseRow['FOB']) || 0) - fobMarca) > 0.0001) fobUpdatedCount += take;
@@ -1927,6 +1952,7 @@ async function loadOcFinalProducto(file) {
           splitRow['Cantidad'] = rem;
           if (embRaw) splitRow['EMBARQUE'] = embRaw;
           if (fFact && !splitRow['Fecha de factura']) splitRow['Fecha de factura'] = fFact;
+          if (fIngEmb) splitRow['Fecha de ingreso embarque'] = fIngEmb;
           if (cFinal) splitRow['Canal Final'] = cFinal;
           if (fobMarca > 0) {
             if (Math.abs((Number(splitRow['FOB']) || 0) - fobMarca) > 0.0001) fobUpdatedCount += rem;
@@ -2119,7 +2145,7 @@ async function promptExcelExport() {
     `<p class="text-slate-600 mb-3">Selecciona el formato de descarga para <b>${S.brand} ${esc(S.season)}</b>:</p>
      <div class="space-y-3">
        <button id="btnExpFull" class="w-full text-left p-3.5 border rounded-lg hover:border-emerald-600 hover:bg-emerald-50/50 transition">
-         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="layers" class="w-4 h-4 text-emerald-700"></i> 1. Base Completa (${fn(S.rows.length)} filas · 37 columnas)</div>
+         <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="layers" class="w-4 h-4 text-emerald-700"></i> 1. Base Completa (${fn(S.rows.length)} filas · 38 columnas)</div>
          <div class="text-xs text-slate-500 mt-1">Incluye todas las etapas (10A, P24, DROP) con columnas iniciales y finales (Canales Finales, PVP Final, Embarque, Factura).</div>
        </button>
        <button id="btnExp10A" class="w-full text-left p-3.5 border rounded-lg hover:border-amber-600 hover:bg-amber-50/50 transition ${!disp10A.length ? 'opacity-50 pointer-events-none' : ''}">
@@ -2252,6 +2278,7 @@ function renderMain() {
 
   const tabs = [
     ['dash', 'Resumen', 'layout-dashboard', ''],
+    ['corp', 'Ingresos por Mes (Corporativo)', 'calendar-range', ''],
     ['mx', 'Matriz de seguimiento', 'table', ''],
     ['prices', 'Alertas de Precio (Reetiquetar)', 'tag', alertBadge],
     ['drop', 'Reporte de DROPS', 'ban', '']
@@ -2282,7 +2309,7 @@ function renderMain() {
     </header>
     <section class="flex-1 min-h-0 overflow-y-auto p-6" id="view"></section>
   `;
-  ({ dash: vDash, mx: vMx, prices: vPrices, drop: vDrop })[S.tab]();
+  ({ dash: vDash, corp: vCorp, mx: vMx, prices: vPrices, drop: vDrop })[S.tab]();
 }
 function kpi(l, v, sub, c, moneyVal) {
   const moneyHtml = moneyVal !== undefined
@@ -2382,6 +2409,374 @@ function vDash() {
     </div>
   `;
 }
+
+/* ============ VISTA CORPORATIVA: INGRESOS DE EMBARQUES POR MES Y SALDO FALTANTE ============ */
+const MESES_ES = [
+  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+];
+
+function parseYearMonth(dateStr) {
+  const s = fdate(dateStr);
+  if (!s) return null;
+  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(s)) {
+    const parts = s.split('-');
+    const y = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (y > 2000 && m >= 1 && m <= 12) return { year: String(y), month: m };
+  }
+  return null;
+}
+
+function getRowIngresoDate(r) {
+  // Prioridad absoluta: Fecha de ingreso embarque (colocada en la OC), luego Fecha de factura, luego Fecha de entrega
+  return r['Fecha de ingreso embarque'] || r['Fecha de factura'] || r['Fecha de entrega'] || '';
+}
+
+function getRowPendienteDate(r) {
+  // Para el saldo pendiente 10A, proyectar según Fecha de ingreso embarque (si tuviera) o Fecha de entrega / venta
+  return r['Fecha de ingreso embarque'] || r['Fecha de entrega'] || r['Fecha de venta'] || '';
+}
+
+let lastCorpExportData = null;
+
+function exportCorpExcel() {
+  if (!lastCorpExportData) return modal('Sin datos', 'No hay información mensual para exportar.');
+  const { brand, scopeLabel, year, rowsSummary, shipmentsDetail } = lastCorpExportData;
+  const aoaSummary = [
+    [`RESUMEN CORPORATIVO DE INGRESOS POR MES · ${brand.toUpperCase()} (${scopeLabel}) · AÑO ${year}`],
+    [],
+    ['Mes', 'Embarques del Mes', 'Unidades Ingresadas (P24)', 'FOB Ingresado ($)', 'Unidades Faltantes (10A)', 'FOB Faltante ($)', 'Total Proyectado Mes (Unid.)', '% Cumplimiento Mes'],
+    ...rowsSummary.map(m => [
+      m.label,
+      m.shipmentsList.join(', ') || 'Sin embarques',
+      m.p24Units,
+      Math.round(m.p24Fob * 100) / 100,
+      m.o10aUnits,
+      Math.round(m.o10aFob * 100) / 100,
+      m.p24Units + m.o10aUnits,
+      m.pctStr
+    ])
+  ];
+  const aoaEmbs = [
+    ['Mes', 'Embarque', 'Temporada', 'Fecha Ingreso Embarque', 'Facturas', 'Líneas', 'Unidades', 'Valor FOB Neto ($)'],
+    ...shipmentsDetail.map(e => [
+      e.monthLabel, e.emb, e.season, e.fechaIngreso || '', e.facturas.join(', '), e.lines, e.units, Math.round(e.fob * 100) / 100
+    ])
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoaSummary), 'Resumen_Mensual');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoaEmbs), 'Detalle_Embarques');
+  XLSX.writeFile(wb, `RESUMEN_INGRESOS_MENSUAL_${brand}_${year}.xlsx`);
+}
+
+async function vCorp() {
+  const view = $('view');
+  view.innerHTML = `<div class="p-8 text-center text-sm text-slate-500">Calculando consolidado mensual corporativo…</div>`;
+  await tick();
+
+  const sourceRows = S.corp.scope === 'brand'
+    ? await getAllBrandRows(S.brand)
+    : S.rows;
+
+  // Detectar años disponibles en los registros
+  const yearsSet = new Set();
+  for (const r of sourceRows) {
+    const k = st(r);
+    const ym = k === 'p' ? parseYearMonth(getRowIngresoDate(r)) : parseYearMonth(getRowPendienteDate(r));
+    if (ym) yearsSet.add(ym.year);
+  }
+  const currentYearStr = String(new Date().getFullYear());
+  if (!yearsSet.size) yearsSet.add(currentYearStr);
+  const availableYears = [...yearsSet].sort();
+  if (!S.corp.year || !availableYears.includes(S.corp.year)) {
+    S.corp.year = availableYears.includes(currentYearStr) ? currentYearStr : availableYears[availableYears.length - 1];
+  }
+  const selYear = S.corp.year;
+
+  // Estructura de 12 meses + índice 0 para "Sin fecha de ingreso / entrega asignada"
+  const monthsData = Array.from({ length: 13 }, (_, idx) => ({
+    idx,
+    label: idx === 0 ? 'Sin fecha asignada' : MESES_ES[idx - 1],
+    p24Units: 0,
+    p24Fob: 0,
+    o10aUnits: 0,
+    o10aFob: 0,
+    dropUnits: 0,
+    shipments: new Map() // key: embName -> { emb, season, fechaIngreso, facturas: Set, lines, units, fob }
+  }));
+
+  let totalYearBoughtUnits = 0, totalYearBoughtFob = 0;
+  let totalYearP24Units = 0, totalYearP24Fob = 0;
+  let totalYear10AUnits = 0, totalYear10AFob = 0;
+  let totalYearDropUnits = 0, totalYearDropFob = 0;
+  let p24WithoutIngresoDate = 0;
+
+  for (const r of sourceRows) {
+    const k = st(r);
+    const qty = Number(r['Cantidad'] || 0);
+    const fob = Number(r['Valor Neto'] || calcValorNeto(r));
+
+    if (k === 'p') {
+      const ym = parseYearMonth(getRowIngresoDate(r));
+      if (ym && ym.year !== selYear) continue;
+      if (!r['Fecha de ingreso embarque']) p24WithoutIngresoDate += qty;
+
+      const mIdx = ym ? ym.month : 0;
+      const bucket = monthsData[mIdx];
+      bucket.p24Units += qty;
+      bucket.p24Fob += fob;
+      totalYearP24Units += qty;
+      totalYearP24Fob += fob;
+      totalYearBoughtUnits += qty;
+      totalYearBoughtFob += fob;
+
+      const embName = String(r['EMBARQUE'] || '').trim() || 'SIN NOMBRE EMBARQUE';
+      if (!bucket.shipments.has(embName)) {
+        bucket.shipments.set(embName, {
+          emb: embName,
+          season: r.season || r['Temporada'] || S.season,
+          fechaIngreso: r['Fecha de ingreso embarque'] || '',
+          facturas: new Set(),
+          lines: 0,
+          units: 0,
+          fob: 0
+        });
+      }
+      const sh = bucket.shipments.get(embName);
+      sh.lines++;
+      sh.units += qty;
+      sh.fob += fob;
+      if (r['Factura']) sh.facturas.add(String(r['Factura']).trim());
+      if (!sh.fechaIngreso && r['Fecha de ingreso embarque']) sh.fechaIngreso = r['Fecha de ingreso embarque'];
+    } else if (k === 'o') {
+      const ym = parseYearMonth(getRowPendienteDate(r));
+      if (ym && ym.year !== selYear) continue;
+
+      const mIdx = ym ? ym.month : 0;
+      const bucket = monthsData[mIdx];
+      bucket.o10aUnits += qty;
+      bucket.o10aFob += fob;
+      totalYear10AUnits += qty;
+      totalYear10AFob += fob;
+      totalYearBoughtUnits += qty;
+      totalYearBoughtFob += fob;
+    } else if (k === 'd') {
+      const ym = parseYearMonth(getRowPendienteDate(r));
+      if (ym && ym.year !== selYear) continue;
+      const mIdx = ym ? ym.month : 0;
+      monthsData[mIdx].dropUnits += qty;
+      totalYearDropUnits += qty;
+      totalYearDropFob += fob;
+      totalYearBoughtUnits += qty;
+      totalYearBoughtFob += fob;
+    }
+  }
+
+  const orderedBuckets = [
+    ...monthsData.slice(1),
+    ...(monthsData[0].p24Units > 0 || monthsData[0].o10aUnits > 0 ? [monthsData[0]] : [])
+  ];
+
+  const rowsSummary = orderedBuckets.map(b => {
+    const embArr = [...b.shipments.values()].sort((a, z) => z.units - a.units);
+    const denom = b.p24Units + b.o10aUnits;
+    const pct = denom > 0 ? (b.p24Units / denom) * 100 : 0;
+    return {
+      ...b,
+      embArr,
+      shipmentsList: embArr.map(x => `${x.emb} (${fn(x.units)})`),
+      pct,
+      pctStr: denom > 0 ? pct.toFixed(1) + '%' : '-'
+    };
+  });
+
+  const shipmentsDetail = [];
+  rowsSummary.forEach(m => {
+    m.embArr.forEach(e => {
+      shipmentsDetail.push({
+        monthLabel: m.label,
+        emb: e.emb,
+        season: e.season,
+        fechaIngreso: e.fechaIngreso,
+        facturas: [...e.facturas],
+        lines: e.lines,
+        units: e.units,
+        fob: e.fob
+      });
+    });
+  });
+
+  const scopeLabel = S.corp.scope === 'brand'
+    ? `Todas las temporadas de ${S.brand}`
+    : `${S.brand} ${S.season}`;
+
+  lastCorpExportData = {
+    brand: S.brand,
+    scopeLabel,
+    year: selYear,
+    rowsSummary,
+    shipmentsDetail
+  };
+
+  const execPct = (totalYearP24Units + totalYear10AUnits) > 0
+    ? ((totalYearP24Units / (totalYearP24Units + totalYear10AUnits)) * 100).toFixed(1)
+    : '0.0';
+
+  const fallbackWarning = p24WithoutIngresoDate > 0
+    ? `<div class="mb-4 p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-950 text-xs flex items-center gap-2">
+         <i data-lucide="info" class="w-4 h-4 text-sky-700 shrink-0"></i>
+         <span>Hay <b>${fn(p24WithoutIngresoDate)} unidades</b> en P24 de OCs anteriores que aún no tienen la columna <b>"Fecha de ingreso embarque"</b>; el sistema las ubicó usando su <b>Fecha de factura / entrega</b> como respaldo.</span>
+       </div>`
+    : '';
+
+  view.innerHTML = `
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4 bg-white p-4 rounded-lg border">
+      <div>
+        <h2 class="text-base font-bold text-slate-900">Resumen Corporativo de Ingresos por Mes · ${esc(scopeLabel)}</h2>
+        <p class="text-xs text-slate-500">Agrupado por <b>Fecha de ingreso embarque</b> (ingresos P24) y proyección de saldo pendiente por ingresar (10A).</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="inline-flex rounded-md border bg-slate-100 p-0.5 text-xs font-medium">
+          <button type="button" id="btnCorpScopeSeason" class="px-3 py-1.5 rounded ${S.corp.scope === 'season' ? 'bg-white text-slate-900 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'}">Solo ${esc(S.season)}</button>
+          <button type="button" id="btnCorpScopeBrand" class="px-3 py-1.5 rounded ${S.corp.scope === 'brand' ? 'bg-white text-slate-900 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'}">Consolidado ${esc(S.brand)}</button>
+        </div>
+        <select id="selCorpYear" class="border rounded-md px-3 py-1.5 text-sm font-semibold bg-white text-slate-800">
+          ${availableYears.map(y => `<option value="${y}" ${y === selYear ? 'selected' : ''}>Año ${y}</option>`).join('')}
+        </select>
+        <button type="button" onclick="exportCorpExcel()" class="btn !bg-emerald-700 !text-white !border-emerald-700">
+          <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>Exportar Resumen Anual
+        </button>
+      </div>
+    </div>
+
+    ${fallbackWarning}
+
+    <div class="grid gap-3 grid-cols-2 xl:grid-cols-4 mb-5">
+      ${kpi('Total Comprado (' + selYear + ')', fn(totalYearBoughtUnits), 'Incluye P24 + 10A + DROP', '', totalYearBoughtFob)}
+      ${kpi('Ingresado / Embarcado (P24)', fn(totalYearP24Units), execPct + '% de avance sobre activo', 'border-l-4 border-l-emerald-600', totalYearP24Fob)}
+      ${kpi('Faltante por Ingresar (10A)', fn(totalYear10AUnits), 'Saldo pendiente por embarcar', 'border-l-4 border-l-amber-500', totalYear10AFob)}
+      ${kpi('Cancelado (DROP)', fn(totalYearDropUnits), 'Unidades caídas en el año', 'border-l-4 border-l-red-600', totalYearDropFob)}
+    </div>
+
+    <div class="bg-white border rounded-lg overflow-hidden shadow-sm">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm border-collapse">
+          <thead>
+            <tr class="text-left text-xs text-slate-600 bg-slate-50 border-b">
+              <th class="px-4 py-3 font-semibold">Mes (${selYear})</th>
+              <th class="px-4 py-3 font-semibold">Embarques que Ingresan</th>
+              <th class="px-4 py-3 font-semibold text-right">Ingresado (P24)</th>
+              <th class="px-4 py-3 font-semibold text-right">FOB Ingresado</th>
+              <th class="px-4 py-3 font-semibold text-right">Faltante (10A)</th>
+              <th class="px-4 py-3 font-semibold text-right">FOB Faltante</th>
+              <th class="px-4 py-3 font-semibold text-right">Total Mes</th>
+              <th class="px-4 py-3 font-semibold w-36">Cumplimiento</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsSummary.map(m => {
+              const hasActivity = m.p24Units > 0 || m.o10aUnits > 0;
+              const isExpanded = S.corp.expandedMonth === m.idx;
+              const embBadges = m.embArr.length
+                ? m.embArr.map(e => `
+                    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold bg-emerald-50 text-emerald-900 border border-emerald-200 mr-1 mb-1" title="Temporada: ${esc(e.season)}${e.fechaIngreso ? ' · Ingreso: ' + esc(e.fechaIngreso) : ''} · FOB: ${fmoney(e.fob)}">
+                      <span>${esc(e.emb)}</span>
+                      <span class="text-[11px] font-bold text-emerald-700">(${fn(e.units)})</span>
+                    </span>
+                  `).join('')
+                : `<span class="text-xs text-slate-400 italic">${m.o10aUnits > 0 ? 'Pendiente de embarque' : '—'}</span>`;
+
+              const detailRow = (isExpanded && m.embArr.length) ? `
+                <tr class="bg-slate-50/90 border-t border-slate-200">
+                  <td colspan="8" class="px-6 py-3">
+                    <div class="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+                      <i data-lucide="ship" class="w-3.5 h-3.5 text-indigo-700"></i> Desglose detallado de embarques en ${esc(m.label)} ${selYear}:
+                    </div>
+                    <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      ${m.embArr.map(e => `
+                        <div class="bg-white border rounded-md p-2.5 text-xs shadow-2xs">
+                          <div class="flex items-center justify-between font-bold text-slate-900">
+                            <span class="text-indigo-950">${esc(e.emb)}</span>
+                            <span class="text-emerald-700 num">${fn(e.units)} unid.</span>
+                          </div>
+                          <div class="text-slate-500 mt-1 flex flex-wrap justify-between gap-1">
+                            <span>Temp: <b>${esc(e.season)}</b></span>
+                            <span>Ingreso: <b>${esc(e.fechaIngreso || 'Sin fecha')}</b></span>
+                          </div>
+                          <div class="text-slate-600 mt-1 flex justify-between border-t pt-1">
+                            <span class="truncate max-w-[60%]" title="${esc([...e.facturas].join(', '))}">Fact: ${esc([...e.facturas].join(', ') || 'N/A')}</span>
+                            <span class="font-semibold text-slate-800 num">${fmoney(e.fob)}</span>
+                          </div>
+                        </div>
+                      `).join('')}
+                    </div>
+                  </td>
+                </tr>
+              ` : '';
+
+              return `
+                <tr class="border-t ${hasActivity ? 'hover:bg-slate-50' : 'opacity-50'} ${m.embArr.length ? 'cursor-pointer' : ''}" ${m.embArr.length ? `onclick="S.corp.expandedMonth = (S.corp.expandedMonth === ${m.idx} ? null : ${m.idx}); vCorp();"` : ''}>
+                  <td class="px-4 py-3 font-semibold text-slate-900 whitespace-nowrap">
+                    <div class="flex items-center gap-1.5">
+                      ${m.embArr.length ? `<i data-lucide="${isExpanded ? 'chevron-down' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>` : '<span class="w-4"></span>'}
+                      <span>${esc(m.label)}</span>
+                    </div>
+                  </td>
+                  <td class="px-4 py-2.5 max-w-md">${embBadges}</td>
+                  <td class="px-4 py-3 num font-bold text-emerald-800">${m.p24Units ? fn(m.p24Units) : '0'}</td>
+                  <td class="px-4 py-3 num text-slate-700">${m.p24Fob ? fmoney(m.p24Fob) : '$0.00'}</td>
+                  <td class="px-4 py-3 num font-bold ${m.o10aUnits > 0 ? 'text-amber-700' : 'text-slate-400'}">${m.o10aUnits ? fn(m.o10aUnits) : '0'}</td>
+                  <td class="px-4 py-3 num text-slate-600">${m.o10aFob ? fmoney(m.o10aFob) : '$0.00'}</td>
+                  <td class="px-4 py-3 num font-bold text-slate-900">${fn(m.p24Units + m.o10aUnits)}</td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center gap-2">
+                      <div class="flex-1 h-2 rounded-full bg-slate-200 overflow-hidden">
+                        <div class="h-full bg-emerald-600" style="width:${m.pct.toFixed(1)}%"></div>
+                      </div>
+                      <span class="text-xs font-semibold text-slate-700 w-11 text-right num">${m.pctStr}</span>
+                    </div>
+                  </td>
+                </tr>
+                ${detailRow}
+              `;
+            }).join('')}
+          </tbody>
+          <tfoot>
+            <tr class="font-bold text-slate-900 bg-slate-100 border-t-2 border-slate-300">
+              <td class="px-4 py-3">TOTAL ${selYear}</td>
+              <td class="px-4 py-3 text-xs text-slate-600">${fn(shipmentsDetail.length)} embarque(s) en el año</td>
+              <td class="px-4 py-3 num text-emerald-900 text-base">${fn(totalYearP24Units)}</td>
+              <td class="px-4 py-3 num text-emerald-950">${fmoney(totalYearP24Fob)}</td>
+              <td class="px-4 py-3 num text-amber-800 text-base">${fn(totalYear10AUnits)}</td>
+              <td class="px-4 py-3 num text-amber-950">${fmoney(totalYear10AFob)}</td>
+              <td class="px-4 py-3 num text-slate-950 text-base">${fn(totalYearP24Units + totalYear10AUnits)}</td>
+              <td class="px-4 py-3 num text-right text-xs">${execPct}%</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  `;
+
+  icons();
+  $('selCorpYear').onchange = e => {
+    S.corp.year = e.target.value;
+    S.corp.expandedMonth = null;
+    vCorp();
+  };
+  $('btnCorpScopeSeason').onclick = () => {
+    S.corp.scope = 'season';
+    S.corp.expandedMonth = null;
+    vCorp();
+  };
+  $('btnCorpScopeBrand').onclick = () => {
+    S.corp.scope = 'brand';
+    S.corp.expandedMonth = null;
+    vCorp();
+  };
+}
+
 function vMx() {
   const detalles = [...new Set(S.rows.map(r => r['Detalle compra']).filter(Boolean))].sort();
   const canalesIniciales = [...new Set(S.rows.map(r => r['Canal Inicial'] || r['Referencia compra']).filter(Boolean))].sort();
@@ -2491,7 +2886,7 @@ function drawMx() {
   const totalCantidad = rows.reduce((acc, r) => acc + (Number(r['Cantidad']) || 0), 0);
   const totalValorNeto = rows.reduce((acc, r) => acc + (Number(r['Valor Neto']) || calcValorNeto(r)), 0);
   const pg = rows.slice((S.page - 1) * S.size, S.page * S.size);
-  const headers = ['Seg.', 'Detalle compra', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'Cant.', 'FOB', 'Valor Neto', 'PVP', 'PVP Final', 'Factura', 'F. Factura', 'Embarque'];
+  const headers = ['Seg.', 'Detalle compra', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'Cant.', 'FOB', 'Valor Neto', 'PVP', 'PVP Final', 'Factura', 'F. Factura', 'Embarque', 'F. Ingreso Emb.'];
 
   $('tbl').innerHTML = `
     <div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 300px)">
@@ -2532,8 +2927,9 @@ function drawMx() {
               <td class="px-3 py-1.5 font-medium">${esc(r['Factura'])}</td>
               <td class="px-3 py-1.5 whitespace-nowrap text-xs text-slate-600">${esc(r['Fecha de factura'] || '')}</td>
               <td class="px-3 py-1.5 font-semibold text-slate-700 whitespace-nowrap">${esc(r['EMBARQUE'] || '')}</td>
+              <td class="px-3 py-1.5 whitespace-nowrap text-xs font-medium text-sky-900">${esc(r['Fecha de ingreso embarque'] || '')}</td>
             </tr>
-          `}).join('') || '<tr><td colspan="18" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
+          `}).join('') || '<tr><td colspan="19" class="p-6 text-center text-slate-500">Sin resultados para estos filtros.</td></tr>'}
         </tbody>
         ${rows.length ? `
         <tfoot>
@@ -2542,7 +2938,7 @@ function drawMx() {
             <td class="px-3 py-2.5 num font-bold text-slate-900 text-base">${fn(totalCantidad)}</td>
             <td class="px-3 py-2.5"></td>
             <td class="px-3 py-2.5 num font-bold text-indigo-950 text-base">${fmoney(totalValorNeto)}</td>
-            <td colspan="5" class="px-3 py-2.5"></td>
+            <td colspan="6" class="px-3 py-2.5"></td>
           </tr>
         </tfoot>` : ''}
       </table>
