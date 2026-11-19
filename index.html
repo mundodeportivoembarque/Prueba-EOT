@@ -71,7 +71,7 @@ function resolverCanalUnificado(canalInicial) {
   if (!c) return '';
   if (c.includes('PROVEEDOR')) return 'PROVEEDOR';
   if (['KAO', 'EDCA', 'MAYORISTA'].includes(c)) return 'MAYORISTA';
-  if (['TIENDAS', 'WEB ADIDAS TIENDAS'].includes(c)) return 'TIENDAS';
+  if (['TIENDAS', 'WEB ADIDAS TIENDAS', 'WEB REEBOK TIENDAS'].includes(c)) return 'TIENDAS';
   if (['BIG HEAD', 'EXPLORER', 'TAF', 'MARATHON', 'SNEAKERS', 'TELESHOP', 'OUTLET', 'WEB', 'WEB REEBOK MEDEPORT'].includes(c)) return 'MARATHON';
   if (c === 'MARKETING') return 'MARKETING';
   if (c === 'POP UP') return 'POP UP';
@@ -2908,12 +2908,12 @@ async function processBrandBilling(file, ptsFile = null) {
       throw new Error('No se encontraron líneas facturadas válidas con Material y Cantidad > 0.');
     }
 
-    // 2. Ejecutar simulación de descuento contra 10A
-    // En Reebok: prioridad a coincidencia exacta de cantidad (ID + talla + cantidad) para resolver el canal inicial exacto,
-    // y si vienen desagregadas (ej. 4 filas de 1 unid vs 1 fila de 4 unid), descuenta igualmente del saldo disponible y hereda su Canal Inicial!
+    // 2. Ejecutar simulación de descuento contra 10A DESAGREGANDO UNA FILA POR CADA CANAL INICIAL
+    // Así nunca se juntan canales con "/" en una sola celda: cada canal queda en su propia fila con sus unidades exactas.
     const changed = new Set();
     const added = [];
     const appliedP24Rows = [];
+    const disaggregatedLines = [];
     let matchedUnits = 0;
     let totalFileUnits = 0;
     const perSeasonUnits = {};
@@ -2948,7 +2948,7 @@ async function processBrandBilling(file, ptsFile = null) {
           if (rCan && rCan === targetCanalNorm) sc += 25;
           else if (rCanUnif && rCanUnif === targetUnifNorm) sc += 12;
         } else if (isReebok) {
-          // En Reebok sin canal explícito: si existe una fila en 10A con la MISMA cantidad exacta (tu regla ID+Talla+Cantidad), darle prioridad
+          // Prioridad 1: si hay una fila en 10A con la misma cantidad exacta (ID + talla + cantidad)
           if (Math.abs(Number(r['Cantidad']) - line.qty) < 0.001) sc += 20;
         }
 
@@ -2973,11 +2973,36 @@ async function processBrandBilling(file, ptsFile = null) {
           sap: line.tallaSap,
           qty: line.qty
         });
+        // Conservar la línea en la vista previa con su canal original (o vacío si no cruzó)
+        disaggregatedLines.push({ ...line });
         continue;
       }
 
       let rem = line.qty;
-      const inheritedCanals = new Set();
+      const perLineCanalBuckets = new Map(); // canalInicial -> subLine object
+
+      const pushToCanalBucket = (canalIniStr, subQty, subDetalle) => {
+        const cleanIni = String(canalIniStr || line.canalInicial || '').trim();
+        const cleanUnif = resolverCanalUnificado(cleanIni);
+        const bKey = `${cleanIni}|||${subDetalle}`;
+        if (!perLineCanalBuckets.has(bKey)) {
+          perLineCanalBuckets.set(bKey, {
+            ...line,
+            canalInicial: cleanIni,
+            canalUnificado: cleanUnif,
+            compraExtra: line.compraExtra || (subDetalle === 'COMPRA EXTRA' ? 'COMPRA EXTRA' : ''),
+            reqQty: 0,
+            qty: 0,
+            netValue: 0,
+            netValWithoutRound: 0
+          });
+        }
+        const b = perLineCanalBuckets.get(bKey);
+        b.reqQty += subQty;
+        b.qty += subQty;
+        b.netValue = Math.round((b.netPrice * b.qty) * 10000) / 10000;
+        b.netValWithoutRound = Math.round((b.netWithoutRound * b.qty) * 10000) / 10000;
+      };
 
       for (let i = 0; i < pool.length && rem > 0; i++) {
         const baseRow = pool[i];
@@ -2985,8 +3010,8 @@ async function processBrandBilling(file, ptsFile = null) {
         const rowSeason = baseRow.season || S.season;
         const take = Math.min(Number(baseRow['Cantidad']), rem);
 
-        const rowCanalIni = String(baseRow['Canal Inicial'] || resolverCanalInicial(baseRow['Referencia compra'], S.brand) || '').trim();
-        if (rowCanalIni) inheritedCanals.add(rowCanalIni);
+        const rowCanalIni = String(baseRow['Canal Inicial'] || resolverCanalInicial(baseRow['Referencia compra'], S.brand) || line.canalInicial || '').trim();
+        const rowDetalle = String(baseRow['Detalle compra'] || '').trim();
 
         const applyBillingFields = targetRow => {
           targetRow['Etapa'] = EP;
@@ -2997,7 +3022,7 @@ async function processBrandBilling(file, ptsFile = null) {
           if (line.tallaSap) targetRow['Talla'] = line.tallaSap;
           if (line.gridValue) targetRow['Talla marca'] = line.gridValue;
           if (!targetRow['Canal Inicial']) {
-            targetRow['Canal Inicial'] = line.canalInicial || rowCanalIni;
+            targetRow['Canal Inicial'] = rowCanalIni;
           }
           if (line.actividad) targetRow['Actividad'] = line.actividad;
           if (line.grupo) targetRow['Grupo'] = line.grupo;
@@ -3031,14 +3056,13 @@ async function processBrandBilling(file, ptsFile = null) {
           changed.add(baseRow);
           added.push(facturada);
         }
+
+        pushToCanalBucket(rowCanalIni, take, rowDetalle);
       }
 
-      // En Reebok: completar CANAL INICIAL y CANAL UNIFICADO en el Excel maestro transformado a partir de la compra inicial cruzada
-      if (!line.canalInicial && inheritedCanals.size > 0) {
-        const resolvedIni = [...inheritedCanals].join(' / ');
-        line.canalInicial = resolvedIni;
-        const unifs = [...new Set([...inheritedCanals].map(resolverCanalUnificado).filter(Boolean))];
-        line.canalUnificado = unifs.join(' / ');
+      // Agregar una fila independiente por cada canal inicial encontrado en esa talla
+      for (const subLine of perLineCanalBuckets.values()) {
+        disaggregatedLines.push(subLine);
       }
 
       if (rem > 0) {
@@ -3051,10 +3075,17 @@ async function processBrandBilling(file, ptsFile = null) {
           sap: line.tallaSap,
           qty: rem
         });
+        disaggregatedLines.push({
+          ...line,
+          reqQty: rem,
+          qty: rem,
+          netValue: Math.round((line.netPrice * rem) * 10000) / 10000,
+          netValWithoutRound: Math.round((line.netWithoutRound * rem) * 10000) / 10000
+        });
       }
     }
 
-    // Construir objeto de Vista Previa con las columnas exactas según la marca
+    // Construir objeto de Vista Previa desagregado por fila y canal inicial
     const buildPreviewSnapshot = () => {
       if (isReebok) {
         const headers = [
@@ -3072,7 +3103,7 @@ async function processBrandBilling(file, ptsFile = null) {
           embIdx: 25,
           factIdx: 3,
           ptIdx: 2,
-          rows: consolidatedLines.map(r => ({
+          rows: disaggregatedLines.map(r => ({
             isForwarder: r.isForwarder,
             embarque: r.embarque,
             ptKey: r.ptKey,
@@ -3102,7 +3133,7 @@ async function processBrandBilling(file, ptsFile = null) {
           embIdx: 22,
           factIdx: 3,
           ptIdx: 4,
-          rows: consolidatedLines.map(r => ({
+          rows: disaggregatedLines.map(r => ({
             isForwarder: r.isForwarder,
             embarque: r.embarque,
             ptKey: r.ptKey,
@@ -3155,7 +3186,7 @@ async function processBrandBilling(file, ptsFile = null) {
     const ch = await modal(
       `Confirmar Detalle de Facturación ${S.brand} (10A → P24)`,
       `<div class="space-y-3 text-slate-700">
-         <p>Se procesaron <b>${fn(fileInvoices.size)} factura(s)</b> (${fn(consolidatedLines.length)} líneas consolidadas · <b>${fn(totalFileUnits)} unid.</b> en archivo).</p>
+         <p>Se procesaron <b>${fn(fileInvoices.size)} factura(s)</b> (${fn(disaggregatedLines.length)} filas desagregadas por canal · <b>${fn(totalFileUnits)} unid.</b> en archivo).</p>
          <div class="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-xs space-y-1.5">
            <div>✓ <b>Unidades a descontar de 10A a P24:</b> <span class="text-sm font-bold">${fn(matchedUnits)} unid.</span></div>
            <div>${breakdown || '<span class="text-slate-500">Sin unidades cruzadas en 10A</span>'}</div>
@@ -3195,7 +3226,7 @@ async function processBrandBilling(file, ptsFile = null) {
     const userEmb = $('inpBillEmb') ? $('inpBillEmb').value.trim() : '';
     const userFechaIng = $('inpBillFechaIng') ? $('inpBillFechaIng').value.trim() : '';
 
-    consolidatedLines.forEach(l => {
+    disaggregatedLines.forEach(l => {
       if (userFechaFact) l.invoiceDate = userFechaFact;
       if (!l.isForwarder && userEmb) l.embarque = userEmb;
     });
