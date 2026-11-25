@@ -37,9 +37,9 @@
       <div class="font-bold text-white text-sm leading-snug">Sistema de Tracking de Compra</div>
       <div class="text-xs text-slate-400 font-medium mt-0.5">Medeport</div>
     </div>
-    <button type="button" id="cloudStatusBtn" onclick="promptCloudSync()" class="shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5 hover:bg-emerald-900/60 transition cursor-pointer" title="Base Local · Haz clic para vincular carpeta OneDrive / SharePoint">
+    <span class="shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5" title="Almacenamiento local en este equipo">
       <span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local
-    </button>
+    </span>
   </div>
   <nav id="side" class="flex-1 overflow-y-auto py-2"></nav>
 </aside>
@@ -85,19 +85,18 @@ function normalizarCanal(c) {
   if (s === 'EXCLUSIVO WEB' || s === 'WEB REEBOK MEDEPORT') return 'WEB';
   return s;
 }
-/* ============ LAS 37 COLUMNAS MAESTRAS Y COLUMNAS INICIALES (10A) ============ */
+/* ============ LAS 38 COLUMNAS MAESTRAS Y COLUMNAS INICIALES (10A) ============ */
 const E10='10A-NOTIFICACION PRODUCTO DISPONIBLE', EP='P24-INSTRUCCIÓN- GENERACION  DE EMBARQUE', ED='DROP-CANCELADO MARCA';
 const MASTER_COLS = [
-  'Seguimiento', 'Detalle compra', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad', 
+  'Seguimiento', 'Detalle compra', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad',
   'Referencia compra', 'Canal Inicial', 'Canal Final',
   'Código', 'Color', 'Talla', 'Talla marca', 'Descripción', 'Género',
-  'Fecha de entrega', 'Fecha de venta', 'Cantidad', 
+  'Fecha de entrega', 'Fecha de venta', 'Cantidad',
   'FOB', 'Valor Neto',
   'PVP', 'PVP Final', 'PVP retail', 'P4', 'P4 Final', 'PMY', 'PMY Final',
   'Etapa', 'Documento', 'EMBARQUE', 'Fecha estimada inicio',
   'Fecha real inicio', 'Fecha estimada fin', 'Fecha real fin', 'Factura', 'Fecha de factura', 'Fecha de ingreso embarque'
 ];
-// Columnas limpias de compra inicial (sin campos finales de Producto ni facturación) para armar OC inicial (10A)
 const INITIAL_10A_COLS = [
   'Seguimiento', 'Detalle compra', 'Temporada', 'Marca', 'Grupo', 'Categoría', 'Actividad',
   'Referencia compra', 'Canal Inicial',
@@ -118,14 +117,6 @@ const S = {
   logos: {},
   templates: {},
   counts: {},
-  cloud: {
-    dirHandle: null,
-    dirName: '',
-    connected: false,
-    autoSync: true,
-    lastSync: '',
-    filesStatus: {}
-  },
   f: { q: '', etapa: '', detalle: '', canal: '', canalFinal: '', embarque: '', quincena: '', precioCambio: '' },
   corp: { year: '', scope: 'season', expandedMonth: null },
   page: 1,
@@ -149,19 +140,16 @@ const st = r => String(r['Etapa'] || '').startsWith('P24') ? 'p' : String(r['Eta
 const sbKey = () => S.brand + '|' + S.season;
 const busy = m => { $('busyMsg').textContent = m || ''; $('busy').classList.toggle('hidden', !m); };
 const tick = () => new Promise(r => setTimeout(r, 15));
-
 function calcValorNeto(r) {
   const fob = Number(r['FOB'] || 0);
   const qty = Number(r['Cantidad'] || 0);
   return Math.round(fob * qty * 10000) / 10000;
 }
-
 function hasPriceChange(r) {
   const pvpIni = Number(r['PVP'] || 0);
   const pvpFin = Number(r['PVP Final'] || 0);
   return pvpFin > 0 && Math.abs(pvpIni - pvpFin) > 0.001;
 }
-
 function fdate(v) {
   if (!v && v !== 0) return '';
   if (v instanceof Date && !isNaN(v)) {
@@ -210,7 +198,7 @@ function modal(title, body, btns = [['Cerrar', 'x', 1]]) {
 }
 /* ============ MOTOR INDEXEDDB LOCAL ============ */
 const rq = r => new Promise((ok, ko) => { r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
-const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onerror = t.onabort = () => ko(t.error); });
+const txDone = t => new Promise((ok, ko) => { t.oncomplete = ok; t.onabort = () => ko(t.error); });
 function openDB() {
   return new Promise((ok, ko) => {
     const r = indexedDB.open('eot-db-local-v4', 2);
@@ -222,9 +210,6 @@ function openDB() {
       }
       if (!d.objectStoreNames.contains('meta')) {
         d.createObjectStore('meta');
-      }
-      if (!d.objectStoreNames.contains('handles')) {
-        d.createObjectStore('handles');
       }
     };
     r.onsuccess = () => ok(r.result);
@@ -303,7 +288,6 @@ async function reload() {
       r['Valor Neto'] = calcVn;
       dirty = true;
     }
-    // Todo registro histórico que no tenga Detalle compra asignado se etiqueta automáticamente como COMPRA CANAL
     if (!r['Detalle compra'] || !String(r['Detalle compra']).trim()) {
       r['Detalle compra'] = 'COMPRA CANAL';
       dirty = true;
@@ -317,510 +301,6 @@ async function reload() {
   await refreshCounts();
   render();
 }
-/* ============ MOTOR DE SINCRONIZACIÓN ONEDRIVE / SHAREPOINT POR CARPETA (ARCHIVOS SEPARADOS) ============ */
-function updateCloudBadge() {
-  const b = $('cloudStatusBtn');
-  if (!b) return;
-  if (S.cloud.connected && S.cloud.dirHandle) {
-    b.className = 'shrink-0 flex items-center gap-1.5 text-[11px] text-sky-300 font-medium bg-sky-950/80 border border-sky-400/40 px-2 py-0.5 rounded-full mt-0.5 hover:bg-sky-900/70 transition cursor-pointer';
-    b.title = `Carpeta vinculada: ${S.cloud.dirName}${S.cloud.lastSync ? ' · Última sync: ' + S.cloud.lastSync : ''}`;
-    b.innerHTML = `<span class="w-2 h-2 rounded-full bg-sky-400"></span> OneDrive`;
-  } else if (S.cloud.dirHandle) {
-    b.className = 'shrink-0 flex items-center gap-1.5 text-[11px] text-amber-300 font-medium bg-amber-950/70 border border-amber-400/40 px-2 py-0.5 rounded-full mt-0.5 hover:bg-amber-900/70 transition cursor-pointer';
-    b.title = `Carpeta vinculada (${S.cloud.dirName}). Haz clic para reactivar permiso de lectura/escritura.`;
-    b.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> Reconectar`;
-  } else {
-    b.className = 'shrink-0 flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full mt-0.5 hover:bg-emerald-900/60 transition cursor-pointer';
-    b.title = 'Base Local · Haz clic para vincular carpeta OneDrive / SharePoint';
-    b.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400"></span> Local`;
-  }
-}
-
-const buyFileName = (b = S.brand, s = S.season) => `Compra_${b}_${s}.json.gz`;
-const tplFileName = (b = S.brand, s = S.season) => `Plantilla_${b}_${s}.json.gz`;
-const cfgFileName = () => `_config_sistema.json`;
-
-async function saveCloudDirHandle(dirHandle, autoSync = true) {
-  S.cloud.dirHandle = dirHandle;
-  S.cloud.dirName = dirHandle ? dirHandle.name : '';
-  S.cloud.autoSync = autoSync;
-  const t = db.transaction('handles', 'readwrite');
-  if (dirHandle) {
-    t.objectStore('handles').put({
-      dirHandle,
-      autoSync,
-      lastSync: S.cloud.lastSync,
-      filesStatus: S.cloud.filesStatus
-    }, 'cloudFolder');
-  } else {
-    t.objectStore('handles').delete('cloudFolder');
-  }
-  await txDone(t);
-  updateCloudBadge();
-}
-
-async function loadSavedCloudHandle() {
-  try {
-    const rec = await rq(db.transaction('handles').objectStore('handles').get('cloudFolder'));
-    if (rec && rec.dirHandle) {
-      S.cloud.dirHandle = rec.dirHandle;
-      S.cloud.dirName = rec.dirHandle.name || 'Carpeta OneDrive';
-      S.cloud.autoSync = rec.autoSync !== false;
-      S.cloud.lastSync = rec.lastSync || '';
-      S.cloud.filesStatus = rec.filesStatus || {};
-      const perm = await rec.dirHandle.queryPermission({ mode: 'readwrite' });
-      S.cloud.connected = (perm === 'granted');
-    }
-  } catch (e) {}
-  updateCloudBadge();
-}
-
-async function ensureCloudPermission(requestIfNeeded = true) {
-  if (!S.cloud.dirHandle) return false;
-  let perm = await S.cloud.dirHandle.queryPermission({ mode: 'readwrite' });
-  if (perm !== 'granted' && requestIfNeeded) {
-    perm = await S.cloud.dirHandle.requestPermission({ mode: 'readwrite' });
-  }
-  S.cloud.connected = (perm === 'granted');
-  updateCloudBadge();
-  return S.cloud.connected;
-}
-
-async function compressJsonString(jsonStr) {
-  if (typeof CompressionStream !== 'undefined') {
-    const stream = new Blob([jsonStr]).stream().pipeThrough(new CompressionStream('gzip'));
-    return await new Response(stream).arrayBuffer();
-  }
-  return new TextEncoder().encode(jsonStr).buffer;
-}
-
-async function decompressToJsonString(arrayBuffer) {
-  const bytes = new Uint8Array(arrayBuffer);
-  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b && typeof DecompressionStream !== 'undefined') {
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return await new Response(stream).text();
-  }
-  return new TextDecoder().decode(bytes);
-}
-
-async function writeCloudFile(fileName, dataBufferOrStr) {
-  const fileHandle = await S.cloud.dirHandle.getFileHandle(fileName, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(dataBufferOrStr);
-  await writable.close();
-}
-
-async function readCloudFile(fileName) {
-  const fileHandle = await S.cloud.dirHandle.getFileHandle(fileName, { create: false });
-  return await fileHandle.getFile();
-}
-
-// Guarda la configuración global (marcas, temporadas, logos)
-async function pushCloudConfig() {
-  if (!S.cloud.dirHandle) return;
-  const cfg = {
-    app: 'EOT_MEDEPORT_CONFIG',
-    version: '7.1',
-    updatedAt: new Date().toISOString(),
-    seasons: S.seasons,
-    logos: S.logos
-  };
-  await writeCloudFile(cfgFileName(), JSON.stringify(cfg));
-}
-
-// Guarda SOLO el archivo de Compra de la temporada indicada (ej. Compra_Adidas_FW26.json.gz)
-async function pushCloudBuySeason(brand = S.brand, season = S.season, silent = true) {
-  if (!S.cloud.dirHandle) return false;
-  const okPerm = await ensureCloudPermission(!silent);
-  if (!okPerm) return false;
-
-  try {
-    if (!silent) busy(`Guardando ${buyFileName(brand, season)} en OneDrive…`);
-    await tick();
-    const key = `${brand}|${season}`;
-    const seasonRows = (brand === S.brand && season === S.season) ? S.rows : await dbSeason(key);
-    const cleanRows = seasonRows.map(r => {
-      const o = { ...r };
-      delete o.id;
-      return o;
-    });
-    const payload = {
-      app: 'EOT_MEDEPORT_BUY',
-      version: '7.1',
-      brand,
-      season,
-      updatedAt: new Date().toISOString(),
-      rowCount: cleanRows.length,
-      rows: cleanRows
-    };
-    const buf = await compressJsonString(JSON.stringify(payload));
-    const fname = buyFileName(brand, season);
-    await writeCloudFile(fname, buf);
-    await pushCloudConfig();
-
-    const nowStr = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    S.cloud.lastSync = nowStr;
-    S.cloud.filesStatus[fname] = { rows: cleanRows.length, kb: Math.round(buf.byteLength / 1024), time: nowStr };
-    await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
-    if (!silent) busy();
-    return true;
-  } catch (e) {
-    if (!silent) {
-      busy();
-      modal('Error al guardar Compra en OneDrive', esc(e.message || e));
-    }
-    return false;
-  }
-}
-
-// Guarda SOLO el archivo de Plantilla de Presentación de la temporada indicada (ej. Plantilla_Adidas_FW26.json.gz)
-async function pushCloudTemplateSeason(brand = S.brand, season = S.season, silent = true) {
-  if (!S.cloud.dirHandle) return false;
-  const okPerm = await ensureCloudPermission(!silent);
-  if (!okPerm) return false;
-
-  try {
-    if (!silent) busy(`Guardando ${tplFileName(brand, season)} en OneDrive…`);
-    await tick();
-    const key = `${brand}|${season}`;
-    const tplObj = getTplData(key);
-    const skuCount = Object.keys(tplObj.items).length;
-    const payload = {
-      app: 'EOT_MEDEPORT_TEMPLATE',
-      version: '7.1',
-      brand,
-      season,
-      updatedAt: new Date().toISOString(),
-      skuCount,
-      template: tplObj
-    };
-    const buf = await compressJsonString(JSON.stringify(payload));
-    const fname = tplFileName(brand, season);
-    await writeCloudFile(fname, buf);
-    await pushCloudConfig();
-
-    const nowStr = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    S.cloud.lastSync = nowStr;
-    S.cloud.filesStatus[fname] = { skus: skuCount, kb: Math.round(buf.byteLength / 1024), time: nowStr };
-    await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
-    if (!silent) busy();
-    return true;
-  } catch (e) {
-    if (!silent) {
-      busy();
-      modal('Error al guardar Plantilla en OneDrive', esc(e.message || e));
-    }
-    return false;
-  }
-}
-
-// Sincroniza TODAS las marcas/temporadas hacia archivos separados en la carpeta OneDrive
-async function pushAllSeparatedToCloud(silent = false) {
-  if (!S.cloud.dirHandle) return false;
-  const okPerm = await ensureCloudPermission(!silent);
-  if (!okPerm) return false;
-
-  try {
-    if (!silent) busy('Exportando archivos separados por temporada a OneDrive…');
-    await tick();
-    await pushCloudConfig();
-
-    const savedFiles = [];
-    for (const b of Object.keys(S.seasons)) {
-      for (const s of S.seasons[b]) {
-        const key = `${b}|${s}`;
-        const seasonRows = await dbSeason(key);
-        if (seasonRows.length > 0) {
-          await pushCloudBuySeason(b, s, true);
-          savedFiles.push(`${buyFileName(b, s)} (${fn(seasonRows.length)} filas)`);
-        }
-        const tplObj = getTplData(key);
-        if (Object.keys(tplObj.items).length > 0) {
-          await pushCloudTemplateSeason(b, s, true);
-          savedFiles.push(`${tplFileName(b, s)} (${fn(Object.keys(tplObj.items).length)} SKUs)`);
-        }
-      }
-    }
-
-    if (!silent) {
-      busy();
-      modal(
-        'Carpeta OneDrive Sincronizada',
-        `<div class="space-y-2">
-           <p>Se guardaron los archivos independientes en la carpeta <b>${esc(S.cloud.dirName)}</b>:</p>
-           <div class="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-950 text-xs space-y-1 max-h-52 overflow-y-auto">
-             <div class="font-semibold">• ${cfgFileName()} (Marcas, temporadas y logos)</div>
-             ${savedFiles.map(f => `<div>• ${esc(f)}</div>`).join('') || '<div class="text-slate-500">Sin datos cargados aún.</div>'}
-           </div>
-         </div>`
-      );
-    }
-    return true;
-  } catch (e) {
-    if (!silent) {
-      busy();
-      modal('Error al sincronizar carpeta', esc(e.message || e));
-    }
-    return false;
-  }
-}
-
-// Lee y restaura archivos desde la carpeta OneDrive (permite cargar solo la temporada actual o toda la carpeta)
-async function pullFromCloudFolder(onlyActiveSeason = false, silent = false) {
-  if (!S.cloud.dirHandle) return;
-  const okPerm = await ensureCloudPermission(!silent);
-  if (!okPerm) return;
-  try {
-    if (!silent) {
-      busy('Leyendo archivos de la carpeta OneDrive / SharePoint…');
-      await tick();
-    }
-    // 1. Leer configuración (marcas, temporadas y logos) si existe
-    try {
-      const cfgFile = await readCloudFile(cfgFileName());
-      const cfgData = JSON.parse(await cfgFile.text());
-      if (cfgData.seasons) S.seasons = cfgData.seasons;
-      if (cfgData.logos) S.logos = { ...S.logos, ...cfgData.logos };
-      await saveMeta();
-    } catch (e) {}
-    // Listar archivos reales en la carpeta
-    const entries = [];
-    for await (const [name, handle] of S.cloud.dirHandle.entries()) {
-      if (handle.kind === 'file' && (name.startsWith('Compra_') || name.startsWith('Plantilla_')) && name.endsWith('.json.gz')) {
-        entries.push({ name, handle });
-      }
-    }
-    if (!entries.length) {
-      if (!silent) {
-        busy();
-        return modal(
-          'Carpeta sin archivos de tracking',
-          `No se encontraron archivos <code>Compra_...json.gz</code> ni <code>Plantilla_...json.gz</code> dentro de <b>${esc(S.cloud.dirName)}</b>.<br><br>
-          Si es la primera vez que vinculas esta carpeta, haz clic en <b>"Guardar toda la base en carpeta"</b>.`
-        );
-      }
-      await reload();
-      return;
-    }
-    const targetBuy = buyFileName(S.brand, S.season);
-    const targetTpl = tplFileName(S.brand, S.season);
-    const toLoad = onlyActiveSeason
-      ? entries.filter(e => e.name === targetBuy || e.name === targetTpl)
-      : entries;
-    if (!toLoad.length) {
-      if (!silent) {
-        busy();
-        return modal('Sin archivos para esta temporada', `No existen archivos guardados para <b>${S.brand} ${esc(S.season)}</b> en la carpeta.`);
-      }
-      await reload();
-      return;
-    }
-    let loadedBuyCount = 0;
-    let loadedTplCount = 0;
-    for (const item of toLoad) {
-      if (!silent) {
-        busy(`Descargando ${item.name}…`);
-        await tick();
-      }
-      const file = await item.handle.getFile();
-      const buf = await file.arrayBuffer();
-      const jsonStr = await decompressToJsonString(buf);
-      const data = JSON.parse(jsonStr);
-      if (item.name.startsWith('Compra_') && Array.isArray(data.rows)) {
-        const b = data.brand || S.brand;
-        const s = data.season || S.season;
-        if (!S.seasons[b]) S.seasons[b] = [];
-        if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
-        const key = `${b}|${s}`;
-        await dbDelSeason(key);
-        const cleanRows = data.rows.map(r => {
-          const row = { ...r, brand: b, season: s, sb: key };
-          if (row['FOB'] === undefined) row['FOB'] = 0;
-          row['Valor Neto'] = calcValorNeto(row);
-          if (!row['Detalle compra'] || !String(row['Detalle compra']).trim()) row['Detalle compra'] = 'COMPRA CANAL';
-          return row;
-        });
-        await dbAdd(cleanRows);
-        loadedBuyCount += cleanRows.length;
-        S.cloud.filesStatus[item.name] = { rows: cleanRows.length, kb: Math.round(buf.byteLength / 1024), time: new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' }) };
-      } else if (item.name.startsWith('Plantilla_') && data.template) {
-        const b = data.brand || S.brand;
-        const s = data.season || S.season;
-        if (!S.seasons[b]) S.seasons[b] = [];
-        if (!S.seasons[b].includes(s)) S.seasons[b].push(s);
-        const key = `${b}|${s}`;
-        S.templates[key] = data.template;
-        loadedTplCount++;
-        S.cloud.filesStatus[item.name] = { skus: Object.keys(data.template.items || data.template).length, kb: Math.round(buf.byteLength / 1024), time: new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' }) };
-      }
-    }
-    await saveMeta();
-    S.cloud.lastSync = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
-    await reload();
-    if (!silent) {
-      busy();
-      modal(
-        'Sincronización desde OneDrive Completada',
-        `<div class="space-y-2">
-           <p>Se actualizaron los datos locales desde la carpeta <b>${esc(S.cloud.dirName)}</b>:</p>
-           <div class="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-950 text-xs space-y-1">
-             <div>• <b>Registros de compra cargados:</b> ${fn(loadedBuyCount)} filas</div>
-             <div>• <b>Plantillas de presentación cargadas:</b> ${fn(loadedTplCount)} archivo(s)</div>
-           </div>
-         </div>`
-      );
-    }
-  } catch (e) {
-    if (!silent) {
-      busy();
-      modal('Error al leer carpeta OneDrive', esc(e.message || e));
-    }
-  }
-}
-
-async function linkCloudFolder() {
-  if (!window.showDirectoryPicker) {
-    return modal('Navegador no compatible', 'Tu navegador no soporta selección de carpetas. Usa Google Chrome o Microsoft Edge actualizado.');
-  }
-  try {
-    const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-    await saveCloudDirHandle(dirHandle, true);
-    S.cloud.connected = true;
-    updateCloudBadge();
-
-    // Revisar si la carpeta ya tiene archivos guardados previamente
-    let hasExistingFiles = false;
-    for await (const [name, handle] of dirHandle.entries()) {
-      if (handle.kind === 'file' && (name.startsWith('Compra_') || name.startsWith('Plantilla_'))) {
-        hasExistingFiles = true;
-        break;
-      }
-    }
-
-    if (hasExistingFiles) {
-      const choice = await modal(
-        `Carpeta vinculada: ${esc(dirHandle.name)}`,
-        `<p>Esta carpeta de OneDrive ya contiene archivos de <b>Compras</b> y/o <b>Plantillas</b> guardados previamente.</p>
-         <p class="text-xs text-slate-600 mt-1">¿Qué deseas hacer ahora?</p>`,
-        [['Guardar mis datos actuales en la carpeta', 'push'], ['Cargar datos desde la carpeta a mi navegador', 'pull', 1]]
-      );
-      if (choice === 'pull') {
-        await pullFromCloudFolder(false);
-      } else if (choice === 'push') {
-        await pushAllSeparatedToCloud(false);
-      }
-    } else {
-      await pushAllSeparatedToCloud(false);
-    }
-  } catch (e) {
-    if (e && e.name !== 'AbortError') {
-      modal('No se pudo vincular la carpeta', esc(e.message || e));
-    }
-  }
-}
-
-async function promptCloudSync() {
-  if (S.cloud.dirHandle && !S.cloud.connected) {
-    const ok = await ensureCloudPermission(true);
-    if (ok) {
-      await pullFromCloudFolder(false, false);
-      return;
-    }
-  }
-  const hasDir = Boolean(S.cloud.dirHandle);
-  const isConn = S.cloud.connected;
-  const activeBuyFile = buyFileName(S.brand, S.season);
-  const activeTplFile = tplFileName(S.brand, S.season);
-
-  await modal(
-    'Carpeta Corporativa · OneDrive / SharePoint',
-    `<div class="space-y-3 text-slate-700">
-       <p class="text-xs text-slate-600">Vincula una carpeta de tu <b>OneDrive o SharePoint</b> de Medeport. El sistema guarda <b>archivos independientes y comprimidos (.json.gz)</b> separados por cada <b>Compra</b> y cada <b>Plantilla de Presentación</b> de cada marca y temporada.</p>
-
-       ${hasDir ? `
-       <div class="p-3 rounded-lg ${isConn ? 'bg-sky-50 border-sky-200 text-sky-950' : 'bg-amber-50 border-amber-300 text-amber-950'} border text-xs space-y-1.5">
-         <div class="flex items-center justify-between">
-           <span class="font-bold">Carpeta vinculada: 📁 ${esc(S.cloud.dirName)}</span>
-           <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isConn ? 'bg-sky-200 text-sky-900' : 'bg-amber-200 text-amber-900'}">${isConn ? 'CONECTADA' : 'PERMISO PENDIENTE'}</span>
-         </div>
-         <div class="text-[11px] text-slate-600">
-           Archivos de la temporada activa (<b>${S.brand} ${esc(S.season)}</b>):<br>
-           • <code>${esc(activeBuyFile)}</code><br>
-           • <code>${esc(activeTplFile)}</code>
-         </div>
-         ${S.cloud.lastSync ? `<div>Última sincronización: <b>${esc(S.cloud.lastSync)}</b></div>` : ''}
-         <label class="flex items-center gap-2 pt-1 cursor-pointer select-none">
-           <input type="checkbox" id="chkCloudAutoSync" class="w-3.5 h-3.5 accent-sky-700" ${S.cloud.autoSync ? 'checked' : ''}>
-           <span>Autoguardar cada archivo individual automáticamente al hacer cambios</span>
-         </label>
-       </div>
-
-       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-         <button id="btnCloudPushSeason" class="p-2.5 border rounded-lg text-left hover:border-sky-600 hover:bg-sky-50/50 transition">
-           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="upload-cloud" class="w-4 h-4 text-sky-700"></i> Subir solo ${S.brand} ${esc(S.season)}</div>
-           <div class="text-[11px] text-slate-500 mt-0.5">Actualiza solo la compra y plantilla de esta temporada.</div>
-         </button>
-         <button id="btnCloudPullSeason" class="p-2.5 border rounded-lg text-left hover:border-emerald-600 hover:bg-emerald-50/50 transition">
-           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="download-cloud" class="w-4 h-4 text-emerald-700"></i> Bajar solo ${S.brand} ${esc(S.season)}</div>
-           <div class="text-[11px] text-slate-500 mt-0.5">Trae solo los archivos de esta temporada desde OneDrive.</div>
-         </button>
-         <button id="btnCloudPushAll" class="p-2.5 border rounded-lg text-left hover:border-indigo-600 hover:bg-indigo-50/50 transition">
-           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="layers" class="w-4 h-4 text-indigo-700"></i> Guardar toda la base en carpeta</div>
-           <div class="text-[11px] text-slate-500 mt-0.5">Exporta todas las marcas y temporadas en archivos separados.</div>
-         </button>
-         <button id="btnCloudPullAll" class="p-2.5 border rounded-lg text-left hover:border-teal-600 hover:bg-teal-50/50 transition">
-           <div class="font-semibold text-slate-900 text-xs flex items-center gap-1.5"><i data-lucide="refresh-cw" class="w-4 h-4 text-teal-700"></i> Actualizar toda la carpeta</div>
-           <div class="text-[11px] text-slate-500 mt-0.5">Sincroniza todas las temporadas guardadas en OneDrive.</div>
-         </button>
-       </div>
-
-       <div class="border-t pt-2.5 flex flex-wrap gap-2 justify-between items-center text-xs">
-         <button id="btnCloudSelectFolder" class="text-indigo-700 font-semibold hover:underline">Cambiar carpeta de OneDrive</button>
-         <button id="btnCloudUnlink" class="text-red-600 hover:underline">Desvincular carpeta</button>
-       </div>
-       ` : `
-       <div class="pt-1">
-         <button id="btnCloudSelectFolder" class="w-full text-left p-4 border-2 border-dashed border-sky-300 rounded-lg hover:border-sky-600 hover:bg-sky-50/50 transition">
-           <div class="font-semibold text-slate-900 flex items-center gap-2"><i data-lucide="folder-sync" class="w-5 h-5 text-sky-700"></i> Seleccionar Carpeta de OneDrive / SharePoint</div>
-           <div class="text-xs text-slate-500 mt-1">Elige la carpeta compartida de Medeport en tu PC. El sistema organizará automáticamente archivos independientes como <code>Compra_Adidas_FW26.json.gz</code> y <code>Plantilla_Adidas_FW26.json.gz</code>.</div>
-         </button>
-       </div>
-       `}
-     </div>`,
-    [['Cerrar', 'c']]
-  );
-  icons();
-}
-
-document.addEventListener('click', async e => {
-  if (e.target.closest('#btnCloudSelectFolder')) { $('modal').classList.add('hidden'); await linkCloudFolder(); }
-  if (e.target.closest('#btnCloudPushSeason')) {
-    $('modal').classList.add('hidden');
-    const ok1 = await pushCloudBuySeason(S.brand, S.season, false);
-    const ok2 = await pushCloudTemplateSeason(S.brand, S.season, false);
-    if (ok1 || ok2) modal('Temporada Sincronizada', `Se actualizaron <b>${esc(buyFileName())}</b> y <b>${esc(tplFileName())}</b> en OneDrive.`);
-  }
-  if (e.target.closest('#btnCloudPullSeason')) { $('modal').classList.add('hidden'); await pullFromCloudFolder(true); }
-  if (e.target.closest('#btnCloudPushAll')) { $('modal').classList.add('hidden'); await pushAllSeparatedToCloud(false); }
-  if (e.target.closest('#btnCloudPullAll')) { $('modal').classList.add('hidden'); await pullFromCloudFolder(false); }
-  if (e.target.closest('#btnCloudUnlink')) {
-    $('modal').classList.add('hidden');
-    S.cloud.connected = false;
-    await saveCloudDirHandle(null, false);
-    modal('Carpeta desvinculada', 'Se desvinculó la carpeta de OneDrive. Tus datos siguen guardados localmente en este navegador.');
-  }
-});
-
-document.addEventListener('change', async e => {
-  if (e.target && e.target.id === 'chkCloudAutoSync') {
-    S.cloud.autoSync = e.target.checked;
-    if (S.cloud.dirHandle) {
-      await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
-    }
-  }
-});
-
 /* ============ GESTIÓN DE LOGOS DE MARCA ============ */
 function triggerLogoUpload(brand) {
   logoTargetBrand = brand;
@@ -834,14 +314,6 @@ async function handleLogoUpload(file) {
     await saveMeta();
     renderSide();
     icons();
-    if (S.cloud.dirHandle && S.cloud.autoSync) {
-      const ok = await ensureCloudPermission(true);
-      if (ok) {
-        await pushCloudConfig();
-        S.cloud.lastSync = new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        await saveCloudDirHandle(S.cloud.dirHandle, S.cloud.autoSync);
-      }
-    }
   };
   reader.readAsDataURL(file);
 }
@@ -858,7 +330,6 @@ function getTplData(key = sbKey()) {
 function isRowLockedByEmbarque(r) {
   return Boolean(String(r['EMBARQUE'] || '').trim());
 }
-
 function applyTemplateToRow(r, tplCatalog) {
   const itemsMap = tplCatalog && tplCatalog.items ? tplCatalog.items : tplCatalog;
   if (!itemsMap || isRowLockedByEmbarque(r)) return false;
@@ -866,7 +337,6 @@ function applyTemplateToRow(r, tplCatalog) {
   if (!cod) return false;
   const item = itemsMap[cod];
   if (!item) return false;
-
   let changed = false;
   if (item.descripcion && r['Descripción'] !== item.descripcion) { r['Descripción'] = item.descripcion; changed = true; }
   if (item.grupo && r['Grupo'] !== item.grupo) { r['Grupo'] = item.grupo; changed = true; }
@@ -875,7 +345,6 @@ function applyTemplateToRow(r, tplCatalog) {
   if (item.color && (!r['Color'] || norm(r['Color']) === 'faltacolor')) { r['Color'] = item.color; changed = true; }
   if (item.fEntrega && r['Fecha de entrega'] !== item.fEntrega) { r['Fecha de entrega'] = item.fEntrega; changed = true; }
   if (item.fVenta && r['Fecha de venta'] !== item.fVenta) { r['Fecha de venta'] = item.fVenta; changed = true; }
-
   if (item.fob > 0 && Math.abs((Number(r['FOB']) || 0) - item.fob) > 0.0001) {
     r['FOB'] = item.fob;
     changed = true;
@@ -903,13 +372,11 @@ function applyTemplateToRow(r, tplCatalog) {
   }
   return changed;
 }
-
 async function promptPresentationTemplate() {
   const currentCatalog = getTplData(sbKey()).items;
   const skuCount = Object.keys(currentCatalog).length;
   const unlockedRows = S.rows.filter(r => !isRowLockedByEmbarque(r)).length;
   const lockedRows = S.rows.length - unlockedRows;
-
   await modal(
     `Plantilla de Presentación · ${S.brand} ${esc(S.season)}`,
     `<div class="space-y-3 text-slate-700">
@@ -938,7 +405,6 @@ async function promptPresentationTemplate() {
   );
   icons();
 }
-
 let tplUploadMode = 'merge';
 document.addEventListener('click', e => {
   if (e.target.closest('#btnTplMerge')) {
@@ -956,7 +422,6 @@ document.addEventListener('click', e => {
     viewPresentationTemplate();
   }
 });
-
 function getTplRowArray(it, headers) {
   if (Array.isArray(it.fullRow) && it.fullRow.length) return it.fullRow;
   return [
@@ -964,7 +429,6 @@ function getTplRowArray(it, headers) {
     it.fob || 0, it.pvp || 0, it.pvpRetail || 0, it.p4 || 0, it.pmy || 0, it.fEntrega || '', it.fVenta || ''
   ];
 }
-
 function exportPresentationTemplate() {
   const { headers, items } = getTplData(sbKey());
   const list = Object.values(items);
@@ -977,19 +441,16 @@ function exportPresentationTemplate() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'CONSOLIDADO');
   XLSX.writeFile(wb, `PLANTILLA_PRESENTACION_${S.brand}_${S.season}.xlsx`);
 }
-
 function viewPresentationTemplate() {
   const { headers, items } = getTplData(sbKey());
   const allItems = Object.values(items).sort((a, b) => String(a.codigo || '').localeCompare(String(b.codigo || '')));
   if (!allItems.length) {
     return modal('Plantilla vacía', 'Aún no has cargado una Plantilla de Presentación en esta temporada.');
   }
-
   const hasFullCols = Boolean(allItems[0] && Array.isArray(allItems[0].fullRow));
   const grupos = [...new Set(allItems.map(x => x.grupo).filter(Boolean))].sort();
   let tplPage = 1;
   const tplPageSize = 50;
-
   const m = $('modal');
   m.innerHTML = `<div class="bg-white rounded-lg shadow-xl w-full max-w-[96vw] max-h-[92vh] flex flex-col p-6">
     <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -1004,11 +465,9 @@ function viewPresentationTemplate() {
         <button type="button" id="btnCloseTplView" class="btn">Cerrar</button>
       </div>
     </div>
-
     ${!hasFullCols ? `<div class="mb-3 p-2.5 rounded bg-amber-50 border border-amber-300 text-amber-900 text-xs">
-      <b>Nota:</b> Esta plantilla se cargó antes de activar la vista completa de 54 columnas. Si deseas ver todas las columnas originales de SAP/Producto aquí mismo, vuelve a subirla con <b>"Reemplazar Plantilla completa"</b>.
+      <b>Nota:</b> Esta plantilla se cargó antes de activar la vista completa de columnas. Si deseas ver todas las columnas originales aquí mismo, vuelve a subirla con <b>"Reemplazar Plantilla completa"</b>.
     </div>` : ''}
-
     <div class="flex flex-wrap items-center gap-2 mb-3">
       <input type="text" id="tplSearchInput" class="border rounded px-3 py-1.5 text-sm w-80 bg-white" placeholder="Buscar por Código, Descripción, Campaña, Línea, Color..." autofocus>
       <select id="tplFilterGrupo" class="border rounded px-2.5 py-1.5 text-sm bg-white">
@@ -1017,7 +476,6 @@ function viewPresentationTemplate() {
       </select>
       <span id="tplResultCount" class="text-xs text-slate-500 ml-auto font-medium"></span>
     </div>
-
     <div class="border rounded-lg overflow-auto flex-1">
       <table class="w-full text-xs border-collapse">
         <thead>
@@ -1028,7 +486,6 @@ function viewPresentationTemplate() {
         <tbody id="tplTableBody"></tbody>
       </table>
     </div>
-
     <div class="flex items-center justify-between text-xs mt-3 pt-2 border-t">
       <span id="tplPageInfo" class="text-slate-600"></span>
       <div class="flex gap-2">
@@ -1039,7 +496,6 @@ function viewPresentationTemplate() {
   </div>`;
   m.classList.remove('hidden');
   icons();
-
   const renderTplRows = () => {
     const q = $('tplSearchInput').value.trim().toLowerCase();
     const grp = $('tplFilterGrupo').value;
@@ -1052,15 +508,12 @@ function viewPresentationTemplate() {
       }
       return true;
     });
-
     const totalPages = Math.max(1, Math.ceil(filtered.length / tplPageSize));
     if (tplPage > totalPages) tplPage = totalPages;
     const slice = filtered.slice((tplPage - 1) * tplPageSize, tplPage * tplPageSize);
-
     $('tplResultCount').textContent = filtered.length === allItems.length
       ? `${fn(allItems.length)} SKUs en total`
       : `Mostrando ${fn(filtered.length)} de ${fn(allItems.length)} SKUs`;
-
     $('tplTableBody').innerHTML = slice.map(it => {
       const cells = getTplRowArray(it, headers);
       return `<tr class="border-t hover:bg-violet-50/40">
@@ -1072,33 +525,26 @@ function viewPresentationTemplate() {
         }).join('')}
       </tr>`;
     }).join('') || `<tr><td colspan="${headers.length}" class="p-8 text-center text-slate-400">No se encontraron SKUs que coincidan con la búsqueda.</td></tr>`;
-
     $('tplPageInfo').textContent = `Página ${tplPage} de ${totalPages}`;
     $('tplPrevBtn').disabled = tplPage <= 1;
     $('tplNextBtn').disabled = tplPage >= totalPages;
   };
-
   $('tplSearchInput').oninput = () => { tplPage = 1; renderTplRows(); };
   $('tplFilterGrupo').onchange = () => { tplPage = 1; renderTplRows(); };
   $('tplPrevBtn').onclick = () => { if (tplPage > 1) { tplPage--; renderTplRows(); } };
   $('tplNextBtn').onclick = () => { tplPage++; renderTplRows(); };
   $('btnExportTplXlsx').onclick = exportPresentationTemplate;
   $('btnCloseTplView').onclick = () => m.classList.add('hidden');
-
   renderTplRows();
 }
-
 async function loadPresentationTemplate(file) {
   try {
     busy('Analizando Plantilla de Presentación…');
     await tick();
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-    // Buscar la hoja CONSOLIDADO o la primera hoja
     const targetSheetName = wb.SheetNames.find(n => norm(n).includes('consolidado')) || wb.SheetNames[0];
     const aoa = XLSX.utils.sheet_to_json(wb.Sheets[targetSheetName], { header: 1, defval: '', raw: true });
     if (!aoa.length) throw new Error('La hoja de la plantilla está vacía.');
-
-    // Detectar dinámicamente la fila de encabezados real (donde aparece CODIGO y FOB/PVP/DETALLE)
     let headerRowIdx = -1;
     for (let i = 0; i < Math.min(15, aoa.length); i++) {
       const rowNorm = aoa[i].map(c => norm(c));
@@ -1110,7 +556,6 @@ async function loadPresentationTemplate(file) {
     if (headerRowIdx === -1) {
       throw new Error('No se encontró la fila de encabezados con "CODIGO" y "FOB/PVP/DETALLE" en la plantilla.');
     }
-
     const rawHeaders = aoa[headerRowIdx].map((h, idx) => String(h ?? '').trim() || `COL_${idx + 1}`);
     const colIdx = {};
     rawHeaders.forEach((h, idx) => {
@@ -1118,7 +563,6 @@ async function loadPresentationTemplate(file) {
       if (!nh) return;
       if (colIdx[nh] === undefined) colIdx[nh] = idx;
     });
-
     const getCell = (rowArr, aliases) => {
       for (const a of aliases) {
         const idx = colIdx[norm(a)];
@@ -1128,7 +572,6 @@ async function loadPresentationTemplate(file) {
       }
       return '';
     };
-
     const prevEntry = S.templates[sbKey()];
     const prevItems = prevEntry && prevEntry.items ? prevEntry.items : (prevEntry && !prevEntry.items ? prevEntry : {});
     const existingCatalog = tplUploadMode === 'merge' ? { ...prevItems } : {};
@@ -1136,23 +579,19 @@ async function loadPresentationTemplate(file) {
       ? prevEntry.headers
       : rawHeaders;
     let parsedSkus = 0;
-
     for (let i = headerRowIdx + 1; i < aoa.length; i++) {
       const rowArr = aoa[i];
       const codRaw = String(getCell(rowArr, ['CODIGO', 'Código', 'SAP'])).trim();
       const cod = norm(codRaw);
       if (!cod || cod === 'origen') continue;
-
       const colorRaw = String(getCell(rowArr, ['COLOR PRINCIPAL', 'Color'])).trim();
       const colorClean = (colorRaw && colorRaw !== '-' && !norm(colorRaw).includes('faltacolor')) ? colorRaw : '';
-
       const fullRow = finalHeaders.map((hName, hIdx) => {
         const origIdx = rawHeaders.indexOf(hName);
         const val = origIdx !== -1 ? rowArr[origIdx] : rowArr[hIdx];
         if (val instanceof Date && !isNaN(val)) return fdate(val);
         return val == null ? '' : val;
       });
-
       existingCatalog[cod] = {
         codigo: codRaw,
         descripcion: String(getCell(rowArr, ['DETALLE', 'Descripción', 'DESCRIPCION'])).trim(),
@@ -1171,15 +610,11 @@ async function loadPresentationTemplate(file) {
       };
       parsedSkus++;
     }
-
     if (!parsedSkus) {
       throw new Error('No se encontraron filas con códigos válidos debajo de los encabezados.');
     }
-
     S.templates[sbKey()] = { headers: finalHeaders, items: existingCatalog };
     await saveMeta();
-
-    // Aplicar inmediatamente solo a las filas existentes que NO tienen EMBARQUE asignado
     const modifiedRows = [];
     let skippedLocked = 0;
     for (const r of S.rows) {
@@ -1191,24 +626,17 @@ async function loadPresentationTemplate(file) {
         modifiedRows.push(r);
       }
     }
-
     if (modifiedRows.length) {
-      busy('Sincronizando registros sin embarque…');
+      busy('Sincronizando registros sin embarque en la base local…');
       await tick();
       await dbPut(modifiedRows);
     }
-
     await reload();
     busy();
-
-    if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      pushCloudTemplateSeason(S.brand, S.season, true);
-      if (modifiedRows.length) pushCloudBuySeason(S.brand, S.season, true);
-    }
     modal(
-      'Plantilla de Presentación Sincronizada',
+      'Plantilla de Presentación Sincronizada (Local)',
       `<div class="space-y-2">
-         <p>Se procesaron <b>${fn(parsedSkus)} SKUs</b> en el catálogo maestro de <b>${S.brand} ${esc(S.season)}</b> (Total catálogo: <b>${fn(Object.keys(existingCatalog).length)} SKUs</b>).</p>
+         <p>Se procesaron <b>${fn(parsedSkus)} SKUs</b> en el catálogo maestro local de <b>${S.brand} ${esc(S.season)}</b> (Total catálogo: <b>${fn(Object.keys(existingCatalog).length)} SKUs</b>).</p>
          <div class="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs space-y-1">
            <div>✓ <b>${fn(modifiedRows.length)} líneas</b> sin embarque fueron actualizadas (descripción, FOB, precios iniciales y fechas).</div>
            <div>🔒 <b>${fn(skippedLocked)} líneas</b> que ya tienen <b>EMBARQUE</b> asignado se mantuvieron intactas sin alterar sus precios.</div>
@@ -1229,22 +657,21 @@ async function parseExcelFile(file, tipoCompra) {
   if (!raw.length) throw new Error('El archivo no contiene filas legibles.');
   const fileHeaders = Object.keys(raw[0]);
   const headerMap = {};
-  
+
   MASTER_COLS.forEach(mCol => {
     const nCol = norm(mCol);
     const found = fileHeaders.find(h => norm(h) === nCol);
     if (found) headerMap[mCol] = found;
   });
-
   if (!headerMap['FOB']) {
     const fobFallback = fileHeaders.find(h => ['fob', 'costofob', 'preciofob', 'fobunitario', 'valorfob'].includes(norm(h)));
     if (fobFallback) headerMap['FOB'] = fobFallback;
   }
-  
+
   if (!headerMap['Código'] || !headerMap['Cantidad']) {
     throw new Error('El archivo debe incluir obligatoriamente las columnas "Código" y "Cantidad".');
   }
-  
+
   const rows = [];
   for (const o of raw) {
     const r = {};
@@ -1296,22 +723,19 @@ async function loadBuyInitial(file) {
       const c = await modal(
         'Confirmar sobrescritura de temporada',
         `La temporada <b>${S.brand} ${S.season}</b> ya tiene <b>${fn(S.rows.length)} filas</b>.<br><br>
-        Al cargar como <b>Compra Inicial</b> se reemplazará la base actual por las <b>${fn(rows.length)} filas</b> etiquetadas como <b>COMPRA CANAL</b> (Valor Neto: <b>${fmoney(totalFob)}</b>).<br><br>
+        Al cargar como <b>Compra Inicial</b> se reemplazará la base local actual por las <b>${fn(rows.length)} filas</b> etiquetadas como <b>COMPRA CANAL</b> (Valor Neto: <b>${fmoney(totalFob)}</b>).<br><br>
         <span class="text-xs text-slate-500">Si deseas sumar pedidos adicionales sin borrar nada, usa el botón "Cargar compra extra".</span>`,
         [['Cancelar', 'c'], ['Sí, cargar como compra inicial', 'ok', 'danger']]
       );
       if (c !== 'ok') return;
     }
-    busy('Guardando compra inicial…');
+    busy('Guardando compra inicial en el equipo…');
     await tick();
     await dbDelSeason(sbKey());
     await dbAdd(rows, 'Guardando');
     await saveMeta();
     await reload();
     busy();
-        if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      pushCloudBuySeason(S.brand, S.season, true);
-    }
     modal('Compra Inicial Cargada', `Se cargaron con éxito <b>${fn(rows.length)} filas</b> como <b>COMPRA CANAL</b> en <b>${S.brand} ${S.season}</b>.<br>Valor Neto total: <b>${fmoney(totalFob)}</b>.`);
   } catch(e) {
     busy();
@@ -1348,14 +772,11 @@ async function loadBuyExtra(file) {
       [['Cancelar', 'c'], ['Anexar compra', 'ok', 1]]
     );
     if (c !== 'ok') return;
-    busy('Anexando filas a la base…');
+    busy('Anexando filas a la base local…');
     await tick();
     await dbAdd(rows, 'Guardando');
     await reload();
     busy();
-        if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      pushCloudBuySeason(S.brand, S.season, true);
-    }
     modal('Compra Extra Anexada', `Se añadieron <b>${fn(rows.length)} filas</b> como <b>COMPRA EXTRA</b> en estado 10A (Valor Neto: <b>${fmoney(extraFob)}</b>).`);
   } catch(e) {
     busy();
@@ -1367,7 +788,7 @@ async function clearSeasonData() {
   if (!S.rows.length) return modal('Temporada vacía', 'No hay registros cargados en esta temporada.');
   const c1 = await modal(
     '¿Borrar toda la compra de la temporada?',
-    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b>.<br><br>
+    `Estás a punto de eliminar permanentemente los <b>${fn(S.rows.length)} registros</b> de <b>${S.brand} ${S.season}</b> de tu base local.<br><br>
     Esta acción reinicia la temporada a 0 filas.`,
     [['Cancelar', 'c'], ['Continuar con el borrado', 'next', 'danger']]
   );
@@ -1383,10 +804,7 @@ async function clearSeasonData() {
   await dbDelSeason(sbKey());
   await reload();
   busy();
-      if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      pushCloudBuySeason(S.brand, S.season, true);
-    }
-    modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
+  modal('Temporada vaciada', `Se han eliminado todos los registros de <b>${S.brand} ${S.season}</b>.`);
 }
 /* ============ 3B. BORRAR / REVERTIR OCs ESPECÍFICAS CON FILTRO POR EMBARQUE ============ */
 async function promptDeleteOcs() {
@@ -1430,7 +848,7 @@ async function promptDeleteOcs() {
   m.innerHTML = `<div class="bg-white rounded-lg shadow-xl w-full max-w-xl max-h-[90vh] flex flex-col p-6">
     <h3 class="text-lg font-semibold mb-1">Revertir / Borrar OCs específicas</h3>
     <p class="text-xs text-slate-500 mb-3">Filtra por embarque o factura y selecciona las OCs que deseas eliminar de <b>${S.brand} ${esc(S.season)}</b>. Sus unidades regresarán automáticamente a saldo disponible <b>10A</b>.</p>
-    
+
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
       <div class="relative">
         <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-2.5 top-2.5"></i>
@@ -1556,10 +974,7 @@ async function revertOcsByKeys(selectedKeys) {
   if (toDeleteIds.length) await dbDeleteIds(toDeleteIds);
   await reload();
   busy();
-      if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      pushCloudBuySeason(S.brand, S.season, true);
-    }
-    modal('OCs Revertidas', `Se devolvieron <b>${fn(revertedUnits)} unidades</b> a estado disponible <b>10A</b> y se recalcularon los valores netos.`);
+  modal('OCs Revertidas', `Se devolvieron <b>${fn(revertedUnits)} unidades</b> a estado disponible <b>10A</b> y se recalcularon los valores netos.`);
 }
 /* ============ 4. MODAL SELECTOR DE TIPO DE OC ============ */
 async function promptOcType() {
@@ -1724,7 +1139,6 @@ async function loadOcPreliminar(file) {
           if (embFinal) facturada['EMBARQUE'] = embFinal;
           if (refFinal && !facturada['Referencia compra']) facturada['Referencia compra'] = refFinal;
           facturada['Valor Neto'] = calcValorNeto(facturada);
-
           baseRow['Cantidad'] -= rem;
           baseRow['Valor Neto'] = calcValorNeto(baseRow);
           matchedUnits += rem;
@@ -1749,18 +1163,12 @@ async function loadOcPreliminar(file) {
       [['Cancelar', 'c'], ['Aplicar a la base', 'ok', 1]]
     );
     if (ch !== 'ok') return;
-    busy('Actualizando base de datos…');
+    busy('Actualizando base de datos local…');
     await tick();
     await dbPut([...changed]);
     if (added.length) await dbAdd(added);
     await reload();
     busy();
-        if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      const affectedSeasons = new Set([S.season, ...Object.keys(perSeasonUnits)]);
-      for (const sName of affectedSeasons) {
-        pushCloudBuySeason(S.brand, sName, true);
-      }
-    }
     modal('OC Preliminar Cargada', `Se pasaron ${fn(matchedUnits)} unidades a <b>P24</b>.`);
   } catch(e) {
     busy();
@@ -1867,7 +1275,6 @@ async function loadOcFinalProducto(file) {
     const unmatched = [];
     const priceChangedSkus = new Set();
     let priceChangedUnits = 0;
-
     for (const o of raw) {
       const temp = norm(getRowVal(o, ['Temporada', 'Season']));
       const cod = norm(getRowVal(o, ['Código', 'Codigo', 'SAP']));
@@ -1966,7 +1373,6 @@ async function loadOcFinalProducto(file) {
             priceChangedSkus.add(splitRow['Código']);
             priceChangedUnits += rem;
           }
-
           baseRow['Cantidad'] -= rem;
           baseRow['Valor Neto'] = calcValorNeto(baseRow);
           updatedUnits += rem;
@@ -1991,7 +1397,6 @@ async function loadOcFinalProducto(file) {
            <div class="mt-1">Se encontraron <b>${fn(priceChangedSkus.size)} códigos</b> (<b>${fn(priceChangedUnits)} unidades</b>) cuyo <b>PVP Final</b> difiere del <b>PVP Inicial</b>. Podrás revisar y exportar el detalle en la pestaña <b>"Alertas de Precio"</b>.</div>
          </div>`
       : '';
-
     const ch = await modal(
       'Confirmar actualización final de Producto',
       `<p>Se actualizaron con éxito <b>${fn(updatedUnits)} unidades</b> en ${fn(updatedLines)} líneas con su <b>Embarque, Canales Finales, FOB Marca y Precios Confirmados</b>:</p>
@@ -2010,12 +1415,6 @@ async function loadOcFinalProducto(file) {
     if (added.length) await dbAdd(added);
     await reload();
     busy();
-    if (S.cloud.dirHandle && S.cloud.autoSync && S.cloud.connected) {
-      const affectedSeasons = new Set([S.season, ...Object.keys(perSeasonUnits)]);
-      for (const sName of affectedSeasons) {
-        pushCloudBuySeason(S.brand, sName, true);
-      }
-    }
     if (priceChangedSkus.size > 0) {
       const goAlert = await modal(
         'OC Final Aplicada · Acción Requerida',
@@ -2038,20 +1437,21 @@ async function loadOcFinalProducto(file) {
     modal('Error al aplicar OC final', esc(e.message || e));
   }
 }
-
 /* ============ 4C. CRUCE OC DIRECTA COMPLETA (10A -> P24 + FINAL EN UN SOLO PASO) ============ */
 async function loadOcDirectComplete(file) {
   await loadOcPreliminar(file);
   await loadOcFinalProducto(file);
 }
-/* ============ 5. EXPORTAR / IMPORTAR RESPALDO JSON COMPARTIBLE ============ */
+/* ============ 5. EXPORTAR / IMPORTAR RESPALDO JSON LOCAL ============ */
 function exportJsonBackup() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos en esta temporada para exportar.');
   busy('Generando archivo JSON…');
   setTimeout(() => {
+    const key = sbKey();
+    const tpl = S.templates[key] || null;
     const payload = {
-      app: 'EOT_MEDEPORT',
-      version: '5.2',
+      app: 'EOT_MEDEPORT_LOCAL',
+      version: '6.0',
       brand: S.brand,
       season: S.season,
       exportedAt: new Date().toISOString(),
@@ -2060,9 +1460,10 @@ function exportJsonBackup() {
         const o = { ...r };
         delete o.id;
         return o;
-      })
+      }),
+      template: tpl
     };
-    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -2086,12 +1487,13 @@ async function importJsonBackup(file) {
     const b = data.brand || S.brand;
     const s = data.season || S.season;
     const count = data.rows.length;
+    const hasTpl = Boolean(data.template && (data.template.items || Object.keys(data.template).length));
     busy();
     const c = await modal(
-      'Importar respaldo JSON',
-      `El archivo contiene <b>${fn(count)} filas</b> correspondientes a <b>${b} ${s}</b>.<br><br>
-      ¿Deseas cargar estos datos en tu navegador? Se reemplazarán los registros actuales de esa temporada.`,
-      [['Cancelar', 'c'], ['Sí, importar datos', 'ok', 1]]
+      'Importar respaldo JSON a la base local',
+      `El archivo contiene <b>${fn(count)} filas</b> correspondientes a <b>${b} ${s}</b>${hasTpl ? ' (incluye plantilla de presentación)' : ''}.<br><br>
+      ¿Deseas cargar estos datos en la base local de tu equipo? Se reemplazarán los registros actuales de esa temporada.`,
+      [['Cancelar', 'c'], ['Sí, importar a local', 'ok', 1]]
     );
     if (c !== 'ok') return;
     if (!S.seasons[b]) S.seasons[b] = [];
@@ -2099,11 +1501,14 @@ async function importJsonBackup(file) {
     S.brand = b;
     S.season = s;
     const targetKey = b + '|' + s;
+    if (hasTpl) {
+      S.templates[targetKey] = data.template;
+    }
     await saveMeta();
     busy('Guardando datos en la base local…');
     await tick();
     await dbDelSeason(targetKey);
-    
+
     const cleanRows = data.rows.map(r => {
       const row = { ...r, sb: targetKey, brand: b, season: s };
       if (row['FOB'] === undefined) row['FOB'] = 0;
@@ -2114,13 +1519,13 @@ async function importJsonBackup(file) {
     await dbAdd(cleanRows, 'Importando');
     await reload();
     busy();
-    modal('Respaldo Importado', `Se cargaron con éxito ${fn(count)} filas en <b>${b} ${s}</b>.`);
+    modal('Respaldo JSON Importado', `Se cargaron con éxito ${fn(count)} filas en la base local para <b>${b} ${s}</b>.`);
   } catch(e) {
     busy();
     modal('Error al importar JSON', esc(e.message || e));
   }
 }
-/* ============ 6. EXPORTACIONES EXCEL (COMPLETO 37 COLS + DISPONIBLES 10A LIMPIO) ============ */
+/* ============ 6. EXPORTACIONES EXCEL (COMPLETO 38 COLS + DISPONIBLES 10A LIMPIO) ============ */
 function exportExcelWithCols(rowsToExport, cols, sheetName, fileName) {
   busy('Generando archivo Excel…');
   setTimeout(() => {
@@ -2134,12 +1539,10 @@ function exportExcelWithCols(rowsToExport, cols, sheetName, fileName) {
     busy();
   }, 50);
 }
-
 async function promptExcelExport() {
   if (!S.rows.length) return modal('Sin datos', 'No hay datos para exportar.');
   const disp10A = S.rows.filter(r => st(r) === 'o');
   const dispUnits = disp10A.reduce((a, r) => a + (Number(r['Cantidad']) || 0), 0);
-
   await modal(
     'Descargar reporte Excel',
     `<p class="text-slate-600 mb-3">Selecciona el formato de descarga para <b>${S.brand} ${esc(S.season)}</b>:</p>
@@ -2157,7 +1560,6 @@ async function promptExcelExport() {
   );
   icons();
 }
-
 document.addEventListener('click', e => {
   const bFull = e.target.closest('#btnExpFull');
   const b10A = e.target.closest('#btnExp10A');
@@ -2172,15 +1574,14 @@ document.addEventListener('click', e => {
     exportExcelWithCols(disp10A, INITIAL_10A_COLS, 'DISPONIBLES_10A', `DISPONIBLES_10A_${S.brand}_${S.season}.xlsx`);
   }
 });
-
 function exportDrops() {
   const d = S.rows.filter(r => st(r) === 'd');
   if (!d.length) return modal('Sin DROPS', 'No hay cancelaciones (DROP) en esta temporada.');
   const aoa = [
     ['Detalle compra', 'Código', 'Descripción', 'Color', 'Talla', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'EMBARQUE', 'Cantidad', 'FOB', 'Valor Neto'],
     ...d.map(r => [
-      r['Detalle compra'] || '', r['Código'], r['Descripción'], r['Color'], r['Talla'], 
-      r['Referencia compra'], r['Canal Inicial'], r['Canal Final'], 
+      r['Detalle compra'] || '', r['Código'], r['Descripción'], r['Color'], r['Talla'],
+      r['Referencia compra'], r['Canal Inicial'], r['Canal Final'],
       r['EMBARQUE'], r['Cantidad'], r['FOB'] || 0, r['Valor Neto'] || 0
     ])
   ];
@@ -2275,7 +1676,6 @@ function renderMain() {
   const alertBadge = priceAlertsCount > 0
     ? `<span class="ml-1.5 px-1.5 py-0.2 text-[11px] font-bold rounded-full bg-amber-100 text-amber-800 border border-amber-300">${fn(priceAlertsCount)}</span>`
     : '';
-
   const tabs = [
     ['dash', 'Resumen', 'layout-dashboard', ''],
     ['corp', 'Ingresos por Mes (Corporativo)', 'calendar-range', ''],
@@ -2288,7 +1688,7 @@ function renderMain() {
       <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
         <div>
           <h1 class="text-xl font-semibold">${S.brand} ${esc(S.season)}</h1>
-          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Guardado en este navegador</p>
+          <p class="text-xs text-slate-500">${fn(S.rows.length)} registros en total · Almacenado localmente en este equipo</p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button class="btn !bg-violet-50 !text-violet-900 !border-violet-300 hover:!bg-violet-100" onclick="promptPresentationTemplate()" title="Cargar o actualizar el maestro de Plantilla de Presentación de Producto"><i data-lucide="book-open-check" class="w-4 h-4"></i>Plantilla Presentación${Object.keys(getTplData(sbKey()).items).length ? ` <span class="ml-1 px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-violet-200 text-violet-900">${fn(Object.keys(getTplData(sbKey()).items).length)} SKUs</span>` : ''}</button>
@@ -2297,7 +1697,6 @@ function renderMain() {
           <button class="btn btn-p" onclick="promptOcType()"><i data-lucide="git-merge" class="w-4 h-4"></i>Cargar OC trabajada</button>
           <button class="btn btn-warn" onclick="promptDeleteOcs()"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>Revertir / Borrar OC</button>
           <button class="btn !bg-emerald-700 !text-white !border-emerald-700" onclick="promptExcelExport()"><i data-lucide="download" class="w-4 h-4"></i>Descargar Excel</button>
-          <button class="btn !bg-sky-700 !text-white !border-sky-700 hover:!bg-sky-800" onclick="promptCloudSync()" title="Sincronizar base completa con OneDrive / SharePoint"><i data-lucide="cloud" class="w-4 h-4"></i>OneDrive / Nube</button>
           <button class="btn !bg-indigo-700 !text-white !border-indigo-700" onclick="exportJsonBackup()"><i data-lucide="file-json" class="w-4 h-4"></i>Exportar JSON</button>
           <button class="btn !bg-indigo-50 !text-indigo-800 !border-indigo-300" onclick="$('fJsonImport').click()"><i data-lucide="upload" class="w-4 h-4"></i>Importar JSON</button>
           <button class="btn btn-danger" onclick="clearSeasonData()"><i data-lucide="trash-2" class="w-4 h-4"></i>Borrar compra total</button>
@@ -2330,7 +1729,6 @@ function vDash() {
   let fobT = 0, fobP = 0, fobO = 0, fobD = 0;
   let canalUnits = 0, extraUnits = 0, canalFob = 0, extraFob = 0;
   let priceAlerts = 0, priceAlertUnits = 0;
-
   for (const r of S.rows) {
     const q = Number(r['Cantidad'] || 0);
     const vn = Number(r['Valor Neto'] || calcValorNeto(r));
@@ -2340,11 +1738,9 @@ function vDash() {
     if (k === 'p') { p += q; fobP += vn; }
     else if (k === 'd') { d += q; fobD += vn; }
     else { o += q; fobO += vn; }
-
     const det = String(r['Detalle compra'] || '').toUpperCase();
     if (det === 'COMPRA EXTRA') { extraUnits += q; extraFob += vn; }
     else { canalUnits += q; canalFob += vn; }
-
     if (hasPriceChange(r)) {
       priceAlerts++;
       priceAlertUnits += q;
@@ -2352,7 +1748,6 @@ function vDash() {
   }
   const fr = t ? (p / t * 100).toFixed(1) : '0.0';
   const frMoney = fobT ? (fobP / fobT * 100).toFixed(1) : '0.0';
-
   const alertBanner = priceAlerts > 0
     ? `<div class="bg-amber-50 border border-amber-300 rounded-lg p-4 mb-5 flex flex-wrap items-center justify-between gap-3">
          <div class="flex items-start gap-3">
@@ -2365,7 +1760,6 @@ function vDash() {
          <button class="btn !bg-amber-600 !text-white !border-amber-600 hover:!bg-amber-700" onclick="S.tab='prices';S.page=1;render()">Revisar para reetiquetar</button>
        </div>`
     : '';
-
   $('view').innerHTML = `
     ${alertBanner}
     <div class="grid gap-3 grid-cols-2 xl:grid-cols-5">
@@ -2375,7 +1769,6 @@ function vDash() {
       ${kpi('Unidades en DROP', fn(d), 'Cancelado por marca', 'border-l-4 border-l-red-600', fobD)}
       ${kpi('Fill Rate (Unid. / FOB)', fr + '%', 'FOB Ejecutado: ' + frMoney + '%')}
     </div>
-
     <div class="grid gap-4 md:grid-cols-2 mt-5">
       <div class="bg-white rounded-lg border p-5">
         <div class="text-sm font-medium mb-2">Distribución de unidades por etapa</div>
@@ -2390,7 +1783,6 @@ function vDash() {
           <span><b>DROP:</b> ${fn(d)} unid. (${fmoney(fobD)})</span>
         </div>
       </div>
-
       <div class="bg-white rounded-lg border p-5">
         <div class="text-sm font-medium mb-2">Desglose por Detalle de Compra</div>
         <div class="grid grid-cols-2 gap-3 mt-2">
@@ -2409,13 +1801,11 @@ function vDash() {
     </div>
   `;
 }
-
 /* ============ VISTA CORPORATIVA: INGRESOS DE EMBARQUES POR MES Y SALDO FALTANTE ============ */
 const MESES_ES = [
   'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
   'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
 ];
-
 function parseYearMonth(dateStr) {
   const s = fdate(dateStr);
   if (!s) return null;
@@ -2427,19 +1817,13 @@ function parseYearMonth(dateStr) {
   }
   return null;
 }
-
 function getRowIngresoDate(r) {
-  // Prioridad absoluta: Fecha de ingreso embarque (colocada en la OC), luego Fecha de factura, luego Fecha de entrega
   return r['Fecha de ingreso embarque'] || r['Fecha de factura'] || r['Fecha de entrega'] || '';
 }
-
 function getRowPendienteDate(r) {
-  // Para el saldo pendiente 10A, proyectar según Fecha de ingreso embarque (si tuviera) o Fecha de entrega / venta
   return r['Fecha de ingreso embarque'] || r['Fecha de entrega'] || r['Fecha de venta'] || '';
 }
-
 let lastCorpExportData = null;
-
 function exportCorpExcel() {
   if (!lastCorpExportData) return modal('Sin datos', 'No hay información mensual para exportar.');
   const { brand, scopeLabel, year, rowsSummary, shipmentsDetail } = lastCorpExportData;
@@ -2469,17 +1853,13 @@ function exportCorpExcel() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoaEmbs), 'Detalle_Embarques');
   XLSX.writeFile(wb, `RESUMEN_INGRESOS_MENSUAL_${brand}_${year}.xlsx`);
 }
-
 async function vCorp() {
   const view = $('view');
   view.innerHTML = `<div class="p-8 text-center text-sm text-slate-500">Calculando consolidado mensual corporativo…</div>`;
   await tick();
-
   const sourceRows = S.corp.scope === 'brand'
     ? await getAllBrandRows(S.brand)
     : S.rows;
-
-  // Detectar años disponibles en los registros
   const yearsSet = new Set();
   for (const r of sourceRows) {
     const k = st(r);
@@ -2493,8 +1873,6 @@ async function vCorp() {
     S.corp.year = availableYears.includes(currentYearStr) ? currentYearStr : availableYears[availableYears.length - 1];
   }
   const selYear = S.corp.year;
-
-  // Estructura de 12 meses + índice 0 para "Sin fecha de ingreso / entrega asignada"
   const monthsData = Array.from({ length: 13 }, (_, idx) => ({
     idx,
     label: idx === 0 ? 'Sin fecha asignada' : MESES_ES[idx - 1],
@@ -2503,25 +1881,21 @@ async function vCorp() {
     o10aUnits: 0,
     o10aFob: 0,
     dropUnits: 0,
-    shipments: new Map() // key: embName -> { emb, season, fechaIngreso, facturas: Set, lines, units, fob }
+    shipments: new Map()
   }));
-
   let totalYearBoughtUnits = 0, totalYearBoughtFob = 0;
   let totalYearP24Units = 0, totalYearP24Fob = 0;
   let totalYear10AUnits = 0, totalYear10AFob = 0;
   let totalYearDropUnits = 0, totalYearDropFob = 0;
   let p24WithoutIngresoDate = 0;
-
   for (const r of sourceRows) {
     const k = st(r);
     const qty = Number(r['Cantidad'] || 0);
     const fob = Number(r['Valor Neto'] || calcValorNeto(r));
-
     if (k === 'p') {
       const ym = parseYearMonth(getRowIngresoDate(r));
       if (ym && ym.year !== selYear) continue;
       if (!r['Fecha de ingreso embarque']) p24WithoutIngresoDate += qty;
-
       const mIdx = ym ? ym.month : 0;
       const bucket = monthsData[mIdx];
       bucket.p24Units += qty;
@@ -2530,7 +1904,6 @@ async function vCorp() {
       totalYearP24Fob += fob;
       totalYearBoughtUnits += qty;
       totalYearBoughtFob += fob;
-
       const embName = String(r['EMBARQUE'] || '').trim() || 'SIN NOMBRE EMBARQUE';
       if (!bucket.shipments.has(embName)) {
         bucket.shipments.set(embName, {
@@ -2552,7 +1925,6 @@ async function vCorp() {
     } else if (k === 'o') {
       const ym = parseYearMonth(getRowPendienteDate(r));
       if (ym && ym.year !== selYear) continue;
-
       const mIdx = ym ? ym.month : 0;
       const bucket = monthsData[mIdx];
       bucket.o10aUnits += qty;
@@ -2572,12 +1944,10 @@ async function vCorp() {
       totalYearBoughtFob += fob;
     }
   }
-
   const orderedBuckets = [
     ...monthsData.slice(1),
     ...(monthsData[0].p24Units > 0 || monthsData[0].o10aUnits > 0 ? [monthsData[0]] : [])
   ];
-
   const rowsSummary = orderedBuckets.map(b => {
     const embArr = [...b.shipments.values()].sort((a, z) => z.units - a.units);
     const denom = b.p24Units + b.o10aUnits;
@@ -2590,7 +1960,6 @@ async function vCorp() {
       pctStr: denom > 0 ? pct.toFixed(1) + '%' : '-'
     };
   });
-
   const shipmentsDetail = [];
   rowsSummary.forEach(m => {
     m.embArr.forEach(e => {
@@ -2606,11 +1975,9 @@ async function vCorp() {
       });
     });
   });
-
   const scopeLabel = S.corp.scope === 'brand'
     ? `Todas las temporadas de ${S.brand}`
     : `${S.brand} ${S.season}`;
-
   lastCorpExportData = {
     brand: S.brand,
     scopeLabel,
@@ -2618,18 +1985,15 @@ async function vCorp() {
     rowsSummary,
     shipmentsDetail
   };
-
   const execPct = (totalYearP24Units + totalYear10AUnits) > 0
     ? ((totalYearP24Units / (totalYearP24Units + totalYear10AUnits)) * 100).toFixed(1)
     : '0.0';
-
   const fallbackWarning = p24WithoutIngresoDate > 0
     ? `<div class="mb-4 p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-950 text-xs flex items-center gap-2">
          <i data-lucide="info" class="w-4 h-4 text-sky-700 shrink-0"></i>
          <span>Hay <b>${fn(p24WithoutIngresoDate)} unidades</b> en P24 de OCs anteriores que aún no tienen la columna <b>"Fecha de ingreso embarque"</b>; el sistema las ubicó usando su <b>Fecha de factura / entrega</b> como respaldo.</span>
        </div>`
     : '';
-
   view.innerHTML = `
     <div class="flex flex-wrap items-center justify-between gap-3 mb-4 bg-white p-4 rounded-lg border">
       <div>
@@ -2649,16 +2013,13 @@ async function vCorp() {
         </button>
       </div>
     </div>
-
     ${fallbackWarning}
-
     <div class="grid gap-3 grid-cols-2 xl:grid-cols-4 mb-5">
       ${kpi('Total Comprado (' + selYear + ')', fn(totalYearBoughtUnits), 'Incluye P24 + 10A + DROP', '', totalYearBoughtFob)}
       ${kpi('Ingresado / Embarcado (P24)', fn(totalYearP24Units), execPct + '% de avance sobre activo', 'border-l-4 border-l-emerald-600', totalYearP24Fob)}
       ${kpi('Faltante por Ingresar (10A)', fn(totalYear10AUnits), 'Saldo pendiente por embarcar', 'border-l-4 border-l-amber-500', totalYear10AFob)}
       ${kpi('Cancelado (DROP)', fn(totalYearDropUnits), 'Unidades caídas en el año', 'border-l-4 border-l-red-600', totalYearDropFob)}
     </div>
-
     <div class="bg-white border rounded-lg overflow-hidden shadow-sm">
       <div class="overflow-x-auto">
         <table class="w-full text-sm border-collapse">
@@ -2686,7 +2047,6 @@ async function vCorp() {
                     </span>
                   `).join('')
                 : `<span class="text-xs text-slate-400 italic">${m.o10aUnits > 0 ? 'Pendiente de embarque' : '—'}</span>`;
-
               const detailRow = (isExpanded && m.embArr.length) ? `
                 <tr class="bg-slate-50/90 border-t border-slate-200">
                   <td colspan="8" class="px-6 py-3">
@@ -2714,7 +2074,6 @@ async function vCorp() {
                   </td>
                 </tr>
               ` : '';
-
               return `
                 <tr class="border-t ${hasActivity ? 'hover:bg-slate-50' : 'opacity-50'} ${m.embArr.length ? 'cursor-pointer' : ''}" ${m.embArr.length ? `onclick="S.corp.expandedMonth = (S.corp.expandedMonth === ${m.idx} ? null : ${m.idx}); vCorp();"` : ''}>
                   <td class="px-4 py-3 font-semibold text-slate-900 whitespace-nowrap">
@@ -2758,7 +2117,6 @@ async function vCorp() {
       </div>
     </div>
   `;
-
   icons();
   $('selCorpYear').onchange = e => {
     S.corp.year = e.target.value;
@@ -2776,7 +2134,6 @@ async function vCorp() {
     vCorp();
   };
 }
-
 function vMx() {
   const detalles = [...new Set(S.rows.map(r => r['Detalle compra']).filter(Boolean))].sort();
   const canalesIniciales = [...new Set(S.rows.map(r => r['Canal Inicial'] || r['Referencia compra']).filter(Boolean))].sort();
@@ -2887,7 +2244,6 @@ function drawMx() {
   const totalValorNeto = rows.reduce((acc, r) => acc + (Number(r['Valor Neto']) || calcValorNeto(r)), 0);
   const pg = rows.slice((S.page - 1) * S.size, S.page * S.size);
   const headers = ['Seg.', 'Detalle compra', 'Código', 'Descripción', 'Color', 'Talla', 'Etapa', 'Ref. Compra', 'Canal Inicial', 'Canal Final', 'Cant.', 'FOB', 'Valor Neto', 'PVP', 'PVP Final', 'Factura', 'F. Factura', 'Embarque', 'F. Ingreso Emb.'];
-
   $('tbl').innerHTML = `
     <div class="bg-white border rounded-lg overflow-auto" style="max-height:calc(100vh - 300px)">
       <table class="w-full text-sm">
@@ -2966,7 +2322,6 @@ function vPrices() {
   const changed = S.rows.filter(hasPriceChange);
   const totalUnits = changed.reduce((a, r) => a + (Number(r['Cantidad']) || 0), 0);
   const uniqueSkus = new Set(changed.map(r => r['Código'])).size;
-
   $('view').innerHTML = `
     <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
       <div class="grid grid-cols-3 gap-3 max-w-2xl flex-1">
@@ -3055,7 +2410,7 @@ function vDrop() {
     </div>
   `;
 }
-/* ============ INICIALIZACIÓN ============ */
+/* ============ INICIALIZACIÓN LOCAL ============ */
 $('fBuyInit').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadBuyInitial(f); };
 $('fBuyExtra').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadBuyExtra(f); };
 $('fOcPrelim').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadOcPreliminar(f); };
@@ -3081,15 +2436,9 @@ $('fPresTemplate').onchange = e => { const f = e.target.files[0]; e.target.value
       S.brand = act.brand;
       S.season = act.season;
     }
-    await loadSavedCloudHandle();
-    if (S.cloud.dirHandle && S.cloud.connected && S.cloud.autoSync) {
-      await pullFromCloudFolder(false, true);
-    } else {
-      await reload();
-    }
-    updateCloudBadge();
+    await reload();
   } catch(e) {
-    document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB: ' + esc(e.message) + '</p>';
+    document.body.innerHTML = '<p class="p-8">Error iniciando IndexedDB local: ' + esc(e.message) + '</p>';
   }
 })();
 </script>
